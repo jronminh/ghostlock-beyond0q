@@ -1,0 +1,18 @@
+# build artifacts (rebuildable) — không track
+*_a64
+*_arm32
+*.o
+*.ko
+*.elf
+*.so
+*.bin
+__pycache__/
+*.pyc
+
+# nháp / tạm
+_*.raw
+_*.tmp
+*.orig
+*.rej
+
+# Ghi chú: dumps (dumps/*.gz) ĐƯỢC track (bằng chứng).
