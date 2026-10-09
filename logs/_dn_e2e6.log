@@ -1,0 +1,114 @@
+﻿=== e2e6 start 10/10/2026 13:03:08 (HOLD=0 retry) ===
+
+----- attempt 1 / 16 -----
+settling 90s
+slide=0x120000
+result: 
+rootshell: 
+no root; reboot
+
+----- attempt 2 / 16 -----
+settling 90s
+slide=0x158000
+result: [33m[*] [0mcfi fops_before ret=8 value=ffffffc0a4927319 want=ffffffc0a4927319 errno=0 || [32m[+] [0mphysrw: configfs-only mode (pipe slab scan bypassed)
+rootshell: 
+no root; reboot
+
+----- attempt 3 / 16 -----
+settling 90s
+slide=0x98000
+result: [33m[*] [0mcfi fops_before ret=8 value=ffffffc0e35bb319 want=ffffffc0e35bb319 errno=0 || [32m[+] [0mphysrw: configfs-only mode (pipe slab scan bypassed)
+rootshell: 
+no root; reboot
+
+----- attempt 4 / 16 -----
+settling 90s
+slide=0x98000
+result: [33m[*] [0mcfi fops_before ret=8 value=ffffffc0bc369319 want=ffffffc0bc369319 errno=0 || [32m[+] [0mphysrw: configfs-only mode (pipe slab scan bypassed)
+rootshell: 
+no root; reboot
+
+----- attempt 5 / 16 -----
+settling 90s
+slide=0x260000
+result: [33m[*] [0mcfi fops_before ret=8 value=ffffffc0b3007319 want=ffffffc0b3007319 errno=0 || [32m[+] [0mphysrw: configfs-only mode (pipe slab scan bypassed)
+rootshell: 
+no root; reboot
+
+----- attempt 6 / 16 -----
+settling 90s
+slide=0xf8000
+result: [33m[*] [0mcfi fops_before ret=8 value=ffffffc0d6e85319 want=ffffffc0d6e85319 errno=0 || [32m[+] [0mphysrw: configfs-only mode (pipe slab scan bypassed)
+rootshell: 
+no root; reboot
+
+----- attempt 7 / 16 -----
+settling 90s
+slide=0x208000
+result: 
+rootshell: 
+no root; reboot
+
+----- attempt 8 / 16 -----
+settling 90s
+slide=0x108000
+result: [33m[*] [0mcfi fops_before ret=8 value=ffffffc09cf2c319 want=ffffffc09cf2c319 errno=0 || [32m[+] [0mphysrw: configfs-only mode (pipe slab scan bypassed)
+rootshell: 
+no root; reboot
+
+----- attempt 9 / 16 -----
+settling 90s
+slide=0x110000
+result: [33m[*] [0mcfi fops_before ret=8 value=ffffffc0977b4319 want=ffffffc0977b4319 errno=0 || [32m[+] [0mphysrw: configfs-only mode (pipe slab scan bypassed)
+rootshell: 
+no root; reboot
+
+----- attempt 10 / 16 -----
+settling 90s
+slide=0x1d0000
+result: [33m[*] [0mcfi fops_before ret=8 value=ffffffc15bcc7319 want=ffffffc15bcc7319 errno=0 || [32m[+] [0mphysrw: configfs-only mode (pipe slab scan bypassed)
+rootshell: 
+no root; reboot
+
+----- attempt 11 / 16 -----
+settling 90s
+slide=0x190000
+result: [33m[*] [0mcfi fops_before ret=8 value=ffffffc0b81b7319 want=ffffffc0b81b7319 errno=0 || [32m[+] [0mphysrw: configfs-only mode (pipe slab scan bypassed)
+rootshell: 
+no root; reboot
+
+----- attempt 12 / 16 -----
+settling 90s
+slide=0xc0000
+result: [33m[*] [0mcfi fops_before ret=8 value=ffffffc164b25319 want=ffffffc164b25319 errno=0 || [32m[+] [0mphysrw: configfs-only mode (pipe slab scan bypassed)
+rootshell: 
+no root; reboot
+
+----- attempt 13 / 16 -----
+settling 90s
+slide=0xa0000
+result: [33m[*] [0mcfi fops_before ret=8 value=ffffffc0b8d8d319 want=ffffffc0b8d8d319 errno=0 || [32m[+] [0mphysrw: configfs-only mode (pipe slab scan bypassed)
+rootshell: 
+no root; reboot
+
+----- attempt 14 / 16 -----
+settling 90s
+slide=0x150000
+result: [33m[*] [0mcfi fops_before ret=8 value=ffffffc0eff9b319 want=ffffffc0eff9b319 errno=0 || [32m[+] [0mphysrw: configfs-only mode (pipe slab scan bypassed)
+rootshell: 
+no root; reboot
+
+----- attempt 15 / 16 -----
+settling 90s
+slide=0x220000
+result: [33m[*] [0mcfi fops_before ret=8 value=ffffffc0b1d5e319 want=ffffffc0b1d5e319 errno=0 || [32m[+] [0mphysrw: configfs-only mode (pipe slab scan bypassed)
+rootshell: 
+no root; reboot
+
+----- attempt 16 / 16 -----
+settling 90s
+slide=0x240000
+result: [33m[*] [0mcfi fops_before ret=8 value=ffffffc102071319 want=ffffffc102071319 errno=0 || [32m[+] [0mphysrw: configfs-only mode (pipe slab scan bypassed)
+rootshell: 
+no root; reboot
+=== e2e6 done ok=False 10/10/2026 13:59:51 ===

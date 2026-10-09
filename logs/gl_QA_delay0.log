@@ -1,0 +1,7 @@
+﻿adb.exe : adb.ex: no devices/emulators found
+At line:1 char:278
++ ... hell "uptime"; & $adb shell "cat /data/local/tmp/gl.log" 2>&1 | Out-F ...
++                    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (adb.ex: no devices/emulators found:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 

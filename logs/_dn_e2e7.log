@@ -1,0 +1,142 @@
+﻿=== e2e7 start 10/10/2026 14:34:11 (UMH path -> root daemon) ===
+
+----- attempt 1 / 20 -----
+settling 90s
+slide=0x180000
+result: 
+rootshell: 
+no root; reboot
+
+----- attempt 2 / 20 -----
+settling 90s
+slide=0x180000
+result: 
+rootshell: 
+no root; reboot
+
+----- attempt 3 / 20 -----
+settling 90s
+slide=0x1d0000
+result: 
+rootshell: 
+no root; reboot
+
+----- attempt 4 / 20 -----
+settling 90s
+slide=0x150000
+result: 
+rootshell: 
+no root; reboot
+
+----- attempt 5 / 20 -----
+settling 90s
+slide=0x110000
+result: 
+rootshell: 
+no root; reboot
+
+----- attempt 6 / 20 -----
+settling 90s
+slide=0x1b8000
+result: 
+rootshell: 
+no root; reboot
+
+----- attempt 7 / 20 -----
+settling 90s
+slide=0x1f0000
+result: 
+rootshell: 
+no root; reboot
+
+----- attempt 8 / 20 -----
+settling 90s
+slide=0xb8000
+result: 
+rootshell: 
+no root; reboot
+
+----- attempt 9 / 20 -----
+settling 90s
+slide=0x270000
+result: 
+rootshell: 
+no root; reboot
+
+----- attempt 10 / 20 -----
+settling 90s
+slide=0x148000
+result: 
+rootshell: 
+no root; reboot
+
+----- attempt 11 / 20 -----
+settling 90s
+slide=0x200000
+result: 
+rootshell: 
+no root; reboot
+
+----- attempt 12 / 20 -----
+settling 90s
+slide=0x200000
+result: 
+rootshell: 
+no root; reboot
+
+----- attempt 13 / 20 -----
+settling 90s
+slide=0x178000
+result: 
+rootshell: 
+no root; reboot
+
+----- attempt 14 / 20 -----
+settling 90s
+slide=0x210000
+result: 
+rootshell: 
+no root; reboot
+
+----- attempt 15 / 20 -----
+settling 90s
+slide=0x148000
+result: 
+rootshell: 
+no root; reboot
+
+----- attempt 16 / 20 -----
+settling 90s
+slide=0x140000
+result: 
+rootshell: 
+no root; reboot
+
+----- attempt 17 / 20 -----
+settling 90s
+slide=0xe0000
+result: 
+rootshell: 
+no root; reboot
+
+----- attempt 18 / 20 -----
+settling 90s
+slide=0x1e8000
+result: 
+rootshell: 
+no root; reboot
+
+----- attempt 19 / 20 -----
+settling 90s
+slide=0x150000
+result: 
+rootshell: 
+no root; reboot
+
+----- attempt 20 / 20 -----
+settling 90s
+slide=0x248000
+result: 
+rootshell: 
+no root; reboot
+=== e2e7 done ok=False 10/10/2026 15:42:33 ===
