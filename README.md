@@ -29,8 +29,9 @@ modifications. Verified method: configfs arbitrary R/W + **`modprobe_path`** roo
   `call_usermodehelper` writes `/data` (the "write-crippled" case was the *fake*
   work_struct UMH).
 
-Full detail: `docs/KSU_ROOT_FINDINGS.md` (sections 1-13, English), `docs/AUDIT_PHIEN5.md`,
-`docs/BAN_GIAO_PHIEN4.md`, `docs/PHIEN_2026-10-10.md` (Vietnamese, as authored).
+Full detail: `docs/KSU_ROOT_FINDINGS.md` (sections 1-13 — the main findings, English),
+`docs/FLOW_DEBUG.md`, `docs/ROM_MECHANISM_4.14.md`, `docs/RUN_CONFIG.md`,
+`docs/DEBUG_WORKFLOW.md`.
 
 ## Layout
 
@@ -71,9 +72,8 @@ adb shell "cd /data/local/tmp && ONLY_FOPS=1 CFI_STOP_VERIFY=1 SSOPT_EMPTY=1 SSO
 
 ## Notes
 
-- `kp*.gz` are **ZIPs**; the kernel member is `dumpstate_lastkmsg.lst`.
-- Identify dumps by **process name** (`ghostlockXX`), **not** filename — labels
-  have been wrong before (see `AUDIT_PHIEN5.md §2.1`).
+- Raw evidence (kernel dumps, recovered sessions) is kept **locally** and not published
+  in this repo.
 - Never touch bootloader/partition/flash; avoid `adb uninstall`.
 
 ## CLI & log levels (session 5 refactor)
