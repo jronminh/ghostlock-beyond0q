@@ -3,29 +3,34 @@
 Local-only repository dedicated to the device we are testing: S10e Snapdragon
 (`beyond0qltecs`), SD855, Linux **4.14.190**, locked bootloader.
 
-Goal: **temporary root** via a GhostLock port (futex PI UAF) — no bootloader
-unlock, no KernelSU (`MODULE_SIG_FORCE=y`). Ceiling: `RKP_KDP / DMAP_PROT / CFP`
-⇒ **data-only** modifications. Current direction: **(B)** arbitrary R/W through
-**configfs** plus UMH (`call_usermodehelper`).
+Goal: **temporary (per-boot) userspace root** via a GhostLock port (futex PI UAF) on
+a locked, verified-boot Samsung device — no bootloader unlock, no KernelSU
+(`MODULE_SIG_FORCE=y`). Ceiling: `RKP_KDP / DMAP_PROT / CFP` ⇒ **data-only** kernel
+modifications. Verified method: configfs arbitrary R/W + **`modprobe_path`** root helper.
 
 > NOTE: the commit history in this repo is a **curated reconstruction** built from
 > the sessions documented in `docs/`; it is **not** the original development
 > history. The upstream source repo (OnePlus line) is `ghostlock-oneplus`; this is a
 > **deep fork** scoped to beyond0q (the port diverges substantially from upstream).
 
-## Status (end of session 5)
+## Status (end of session 6)
 
 - **Proven:** fops redirect (mode-4) + **configfs arbitrary R/W**; `physrw` via
-  configfs; UMH exec `retval=0` (≥2 samples, no device reset).
-- **Open:** root cause of the **walk stall** (`rb_erase_cached` panic vs
-  hard-lockup); **KDP blocking cred** (no evidence yet — `kp_B18b/c` reset
-  **silently**); **fscrypt/ENOKEY** (unverified).
-- **Critical fixes (session 4):** `selinux_enforcing=0x2DC8CE8` (≠ `selinux_state`);
-  task_struct **+8** caused by `CONFIG_CC_STACKPROTECTOR` adding `stack_canary`
-  right after `tgid` ⇒ `cred=0x858, comm=0x860, pi_blocked_on=0x948`.
+  configfs; **root via `modprobe_path`** → a root helper (`call_usermodehelper`, uid 0
+  + full caps) that **writes `/data`** and serves a **file-driven command channel**
+  (`rcmd`→`rout`). SELinux off, `core_pattern`, `kptr_restrict` writable. cred repoint
+  works but trips RKP.
+- **Blocked by design:** cred / page-table / `.text` edits (RKP `security_integrity_current`
+  panics; `set_memory_rw` is vmalloc-only), unsigned modules (`MODULE_SIG_FORCE`), new
+  `/data` files (fscrypt), `/system` (verity), and **persistence across reboot**
+  (bootloader unlock infeasible: `oem_unlock_allowed=0`, TEE + AVB/SVB green).
+- **Key facts:** `selinux_enforcing=0x2DC8CE8` (≠ `selinux_state`); task_struct **+8**
+  (`CONFIG_CC_STACKPROTECTOR` ⇒ `cred=0x858, comm=0x860, pi_blocked_on=0x948`); a real
+  `call_usermodehelper` writes `/data` (the "write-crippled" case was the *fake*
+  work_struct UMH).
 
-Full detail: `docs/AUDIT_PHIEN5.md`, `docs/BAN_GIAO_PHIEN4.md`,
-`docs/PHIEN_2026-10-10.md` (these docs are in Vietnamese, as authored).
+Full detail: `docs/KSU_ROOT_FINDINGS.md` (sections 1-13, English), `docs/AUDIT_PHIEN5.md`,
+`docs/BAN_GIAO_PHIEN4.md`, `docs/PHIEN_2026-10-10.md` (Vietnamese, as authored).
 
 ## Layout
 
