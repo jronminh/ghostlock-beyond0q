@@ -42,8 +42,13 @@ writes 0 to `selinux_enforcing`**. Trigger = exec a file with an unknown binary 
 (`\xff\xff\xff\xff`) → kernel `request_module("binfmt-ffff")` → `call_modprobe()` runs
 `modprobe_path` **as root** (`call_usermodehelper`, real path).
 
-**Critical requirement:** SELinux must be **permissive first** — while enforcing, the
-LNK `security_kernel_module_request` hook blocks `request_module`, so no helper runs.
+**Two hard requirements (both verified on-device):**
+1. SELinux must be **permissive first** — while enforcing, the LSM
+   `security_kernel_module_request` hook blocks `request_module`, so no helper runs.
+2. The trigger file must hold a **non-printable** magic (4x0xFF). `search_binary_handler()`
+   only calls `request_module("binfmt-%04x")` when the first 4 bytes are *not* printable —
+   a file of `'?'*4` (0x3F, printable) is **silently ignored** and no helper spawns
+   (this bug cost a long debug session; `pwn2` must be 0xFF×4).
 ```
 [run] modprobe_path @... <- '/data/local/tmp/mphelper' wr=25 rd=63 rb='...' selinux_off=1
 [trigger] /data/local/tmp/pwn2
@@ -127,6 +132,17 @@ uid=0(root) gid=0(root) groups=0(root) context=u:r:kernel:s0
 ```
 Root-only paths work (`ls -l /data/adb` succeeds; the shell gets EACCES).
 This is a stable, usable full-root channel without touching code/rodata.
+
+**Operational rules (each cost a debug cycle):**
+- **Arm `rcmd` *before* triggering** — the helper daemon reads the command immediately
+  on spawn (and polls every 300 ms afterwards).
+- **Do NOT delete `rout`/`mp_ran`.** A kernel-spawned process cannot *create* a new file
+  in `/data/local/tmp` (fscrypt ENOKEY); it can only truncate/rewrite an existing file.
+  Pre-create + `cat` (warm) the channel files from the shell, then trigger.
+- **Do NOT exec `mphelper` from the shell to "warm" it** — it forks + `setsid()`s a daemon
+  that lingers in the *shell* domain and hijacks `rcmd`. Plain `cat` warms the fscrypt
+  metadata just as well.
+- A `runcon`/domain change is not available (no `su` binary, `ro.debuggable=0`).
 
 ### What "full root" gives (probe_root.sh)
 | Item | Result |
@@ -244,3 +260,34 @@ Persistence conclusion:
   `/system` (verity), unlock/flash/persistence (TEE + locked bootloader).
 - => A **transient userspace root** (per boot). Kernel-level persistence is out of reach
   from ring0 on this locked, verified-boot Samsung device.
+
+## 14. SELinux userspace confinement (what the kernel-domain root can NOT do)
+`selinux_enforcing=0` makes `getenforce` report **Permissive**, but the root helper runs
+as SELinux `u:r:kernel:s0` (init_cred). Despite `.config` having no `ALWAYS_ENFORCE`, the
+**property_service** check still denies every `setprop` from that domain:
+```
+avc: denied { set } for property=persist.dbg.volte_avail_ovr scontext=u:r:kernel:s0
+     tcontext=u:object_r:telephony_config_prop:s0 tclass=property_service permissive=0
+init: Unable to set property '...' ...: SELinux permission check failed
+```
+Also observed: `settings ...` → **killed** (SIGKILL, rc=137); `setprop persist.sys.*` →
+denied. So from the kernel domain: no properties, no `settings`, no telephony
+(`cmd phone`) — i.e. **no userspace tweaks**.
+
+Consequence: this root is **kernel-level** (kernel R/W, modprobe, `sh -c`, file I/O on
+*warmed* inodes) — it is **not** a Magisk-style userspace root. ROM-level tweaks that live
+in the framework (VoLTE/carrier props, Settings) are **not directly reachable**.
+
+The one persisted-property path that *is* reachable:
+- `/data/property/persistent_properties` is readable **and writable** by the kernel domain
+  (an *existing* file → fscrypt `i_crypt_info` cached): `printf "" >> ...` → `rc=0`.
+- Its format is Android's **protobuf**: a concatenation of entries
+  `0a <len> 0a <namelen> <name> 12 <vallen> <value>` (one per `persist.*` prop). Appending
+  entries sets those `persist.*` props **on the next boot** (init loads the file).
+- Caveat: the live property service keeps the file authoritative and rewrites it on any
+  persist change / shutdown, so an appended entry can be clobbered before a reboot; and
+  RKP guards the policy, so a per-domain policy change is out.
+
+Setting a prop *live* would require writing the property-area trie
+(`/dev/__properties__/…`, mmap the trie + serial) or a policy change (RKP) — not attempted.
+

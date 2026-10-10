@@ -20,7 +20,8 @@ G970F (global/VN) firmware.
 | 5G | ❌ S10e is 4G only |
 | Voice calls | ⚠️ if VoLTE can't register and 2G/3G are gone ⇒ calls may fail |
 
-## Enable VoLTE (run as root — `persist.*` props survive reboot, set once)
+## Enable VoLTE — status: BLOCKED by SELinux
+The intended props are:
 ```sh
 setprop persist.dbg.volte_avail_ovr 1
 setprop persist.dbg.vt_avail_ovr 1
@@ -29,8 +30,19 @@ setprop persist.dbg.ims_volte_enable 1
 setprop persist.radio.calls.on.ims 1
 setprop persist.radio.jbims 1
 ```
-Or run `scripts/vn_volte.sh` (on the device: `/data/local/tmp/vn_volte.sh`).
-Then **reboot** and enable *Settings → Connections → Mobile networks → VoLTE calls*.
+But the root obtained here runs in SELinux domain **`u:r:kernel:s0`**, and the
+**property service denies `setprop` from that domain** (see
+`docs/KSU_ROOT_FINDINGS.md` §14). `scripts/vn_volte.sh` therefore reports
+`Failed to set property …`. There is **no Magisk-style userspace root** on this device
+(locked bootloader + RKP + `user` build), so the framework props can't be set live.
+
+The only reachable alternative is appending the entries to the (writable)
+`/data/property/persistent_properties` protobuf, which would apply them on the **next
+boot** — however the live property service keeps that file authoritative and may rewrite
+it before a reboot. Not implemented as a one-shot yet.
+
+Once the props *are* set (by any means), reboot and enable
+*Settings → Connections → Mobile networks → VoLTE calls*.
 
 ## IMS + data APN (Viettel / VinaPhone / MobiFone)
 Add manually in *Settings → Connections → Mobile networks → Access Point Names*:
@@ -39,5 +51,6 @@ Add manually in *Settings → Connections → Mobile networks → Access Point N
 
 ## Root
 Root is **per boot** (locked bootloader + RKP; no persistent root — see
-`docs/KSU_ROOT_FINDINGS.md`). Re-run the exploit each boot; then run `vn_volte.sh`.
-The `persist.*` props only need setting **once**.
+`docs/KSU_ROOT_FINDINGS.md`), and it is a **kernel-domain** root (`u:r:kernel:s0`) —
+powerful for kernel work, but SELinux blocks userspace property/Settings writes.
+Re-arm each boot with `scripts/enable_vn.ps1` (host) or `scripts/vn_volte.sh` (device).
