@@ -142,3 +142,29 @@ end at `[9]` and skip `[10]/[11]`) fails the same way: `gl10.log` ends at
 reboots (`boot_id` changed; dump `dumps/kp_glA9_owner1.gz`). So the hang is
 **before** `[10]/[11]` — i.e. the `[5] retry` trylock loop — and `OWNER0` does not
 help.
+
+### `+0x1dc` mapped (ROM `Image`, labels correct)
+
+Disassembling the ROM `Image` at `rt_mutex_adjust_prio_chain` (kallsyms
+`0xffffff80080b2eec`, file offset `0xb2eec`) gives:
+
+```
++0x1a8  mov x0, x24              ; lock
++0x1ac  bl  _raw_spin_trylock    ; [5] trylock(&lock->wait_lock)
++0x1b0  cbnz w0, <+0x248>        ; success -> continue
++0x1b4  mov x0, x26              ; else unlock(&task->pi_lock)
++0x1b8  bl  _raw_spin_unlock_irq
++0x1bc  yield ; bl _raw_spin_lock_irq ; ...      ; retry
++0x1d4  mov x0, x26
++0x1d8  bl  _raw_spin_unlock_irq   ; <-- trace lr = +0x1dc
++0x1dc  mov x0, x26 ; yield ; bl _raw_spin_lock_irq ; reload pi_blocked_on
+```
+
+(`_raw_spin_trylock` = `0xffffff80096f99c4`, `_raw_spin_unlock_irq` =
+`0xffffff80096f9c94`.)
+
+⇒ The consumer is stuck in the **`[5] raw_spin_trylock(&lock->wait_lock)` failure →
+`goto retry`** loop: `lock->wait_lock` stays non-zero forever. Our fake
+`lock->wait_lock` (page offset 0) is painted 0, so `lock = waiter->lock` is **not**
+our fake lock at walk time ⇒ the painted `waiter->lock` (waiter+0x38) was
+**clobbered**. This is the **clobber** branch of the root cause (not `rb_erase`).
