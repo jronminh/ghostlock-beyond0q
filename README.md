@@ -79,3 +79,21 @@ The driver keeps its env flags, and adds a thin CLI:
 - Default `SSOPT_HOLD` is now **0** (the `select()` hold overwrites the waiter).
 
 Build from this repo (source of truth): `bash tools/build14.sh /tmp/glXX`.
+
+## Debug shell over the live gadget (`--shell`)
+
+Right after the redirect is verified (and before it is restored), the driver can
+drop into a **same-process** shell while the configfs gadget is still installed,
+so you can inspect/patch kernel memory from adb **without re-winning the flaky PI
+walk**:
+
+```
+adb shell "cd /data/local/tmp && GL_SHELL=1 SSOPT_EMPTY=1 SSOPT_FAKE_TASK=1 \
+  ROUTE_SETSOCKOPT=1 SLIDE=0x... timeout 900 ./glXX --stop-after=verify --shell > gl.log 2>&1 &"
+# then, from adb:
+adb shell 'echo "peek 0xffffffc0c1234500 8" > /data/local/tmp/gl.cmd'
+adb shell 'cat /data/local/tmp/gl.out'          # results
+```
+Commands: `peek <hexaddr> [n]`, `read <hexaddr> <len>`, `write <hexaddr> <hexbytes>`,
+`quit`. Results go to `/data/local/tmp/gl.out`; commands are read from
+`/data/local/tmp/gl.cmd` (consumed+deleted). Auto-exits after ~10 min.

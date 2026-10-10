@@ -7,7 +7,8 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 SRC="src/core/main.c src/core/util.c src/core/slide.c src/core/fops.c \
-src/core/pipe_physrw.c src/core/root.c src/core/miniadb.c src/core/umh_root.c"
+src/core/pipe_physrw.c src/core/root.c src/core/miniadb.c src/core/umh_root.c \
+src/tools/glshell.c"
 OUT=${1:-/tmp/ghostlock}
 
 echo "=== build: $ROOT -> $OUT ==="

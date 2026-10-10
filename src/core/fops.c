@@ -972,6 +972,12 @@ int try_cfi_stage(void) {
     goto fail;
   }
 
+  if (env_flag("GL_SHELL", 0)) {
+    pr_success("cfi: gl shell live (gadget installed); watch /data/local/tmp/gl.out\n");
+    gl_shell_run(fd);
+    pr_success("cfi: gl shell exited\n");
+  }
+
   if (env_flag("CFI_STOP_VERIFY", 0)) {
     /* Redirect verified: the fake fops are installed and working.  Restore the
      * original fops (so /dev/ashmem is not left dangling when we exit) and stop

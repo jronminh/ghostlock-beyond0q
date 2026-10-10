@@ -494,6 +494,7 @@ int leak_kernel_base(int fd);
 int restore_slide_boot_id(int fd);
 int install_child_root(int fd);
 int try_cfi_stage(void);
+int gl_shell_run(int fd);   /* src/tools/glshell.c: debug shell over the live gadget */
 
 void init_ctx(struct mm_ctx *ctx, size_t cnt);
 void resize_pipe_slots(int pipefd[2], size_t slots);

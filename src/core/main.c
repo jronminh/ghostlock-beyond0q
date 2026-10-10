@@ -1075,6 +1075,8 @@ static void cli_parse(int argc, char **argv) {
                    : (strcmp(v, "debug") == 0) ? 2 : 1;
     } else if (strncmp(argv[i], "--stop-after=", 13) == 0) {
       cli_apply_stop_after(argv[i] + 13);
+    } else if (strcmp(argv[i], "--shell") == 0) {
+      setenv("GL_SHELL", "1", 1);
     }
   }
   const char *e = getenv("DN_LOG");
