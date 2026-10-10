@@ -32,8 +32,11 @@ Full detail: `docs/AUDIT_PHIEN5.md`, `docs/BAN_GIAO_PHIEN4.md`,
 ```
 README.md
 docs/            # handoff, prompts, session notes, audit (.md)
-src/             # exploit source (core + per-device offset table), current tree
-  core/
+src/             # exploit source
+  core/          # route + payload builders (single timing-critical process)
+  primitives/    # rootshell.c (root shell daemon, shared driver + payload)
+  payload/       # dnroot.c  -> separate `dnroot` UMH payload binary
+  tools/         # glshell.c -> in-process debug shell over the live gadget
   devices/beyond0q/offsets.h     <-- this device line
 tools/
   probes/        # probe_*.c (measure 4.14 layouts: task_struct/cred/mm/kmem/dt/umh)
@@ -48,10 +51,11 @@ logs/            # exploit stdout logs (gl*.log, _dn_e2e*.log)
 ## Build & run (WSL)
 
 ```
-# build -> glXX_a64
+# build -> glXX_a64 (driver) + glXX_dnroot_a64 (UMH payload)
 bash tools/build14.sh /tmp/glXX
 adb push glXX_a64 /data/local/tmp/glXX
-adb shell "chmod 755 /data/local/tmp/glXX; cp -f /data/local/tmp/glXX /data/local/tmp/a/e; chmod 755 /data/local/tmp/a/e"
+adb push glXX_dnroot_a64 /data/local/tmp/dnroot      # UMH payload (exec'd as uid 0)
+adb shell "chmod 755 /data/local/tmp/glXX /data/local/tmp/dnroot"
 # KASLR slide
 adb shell "cd /data/local/tmp && timeout 60 ./slideprobe > sp.log 2>&1; grep -a -m1 bd4 sp.log"
 # redirect phase (safe stop)

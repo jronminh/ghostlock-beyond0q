@@ -532,7 +532,8 @@ int install_pipe_physrw(int fd);
 int install_configfs_physrw(int fd);
 extern int configfs_physrw;
 int install_umh_root(int fd);
-void handle_umh_mode(int argc, char **argv);
+/* handle_umh_mode() removed: the UMH payload is now the separate `dnroot` binary
+ * (src/payload/dnroot.c). */
 void print_uname_line(const char *tag);
 int run_tmp_page_uname_stage(void);
 

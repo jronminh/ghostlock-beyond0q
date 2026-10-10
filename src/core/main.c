@@ -1096,7 +1096,6 @@ int main(int argc, char **argv) {
   cli_parse(argc, argv);
   pr_debug("cli: log_level=%d\n", dn_log_level);
 
-  handle_umh_mode(argc, argv);
   if (argc > 1 && strcmp(argv[1], "--bootstrap") == 0)
       return run_bootstrap();
   if (argc > 1 && strcmp(argv[1], "--write1") == 0)

