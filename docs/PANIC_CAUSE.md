@@ -133,3 +133,12 @@ device (`boot_id` changed, uptime reset). The device recovered on its own.
 
 ⇒ **The failing step is FLOW 2.14 (the PI walk)**, and the concrete failure is an
 infinite loop in `rt_mutex_adjust_prio_chain`, not a bad write target.
+
+### `SSOPT_OWNER0=1` does NOT avoid it
+
+A follow-up run with `SSOPT_OWNER0=1` (fake `lock->owner = 0`, so the chain should
+end at `[9]` and skip `[10]/[11]`) fails the same way: `gl10.log` ends at
+`consumer: walk begin tid=12632` with **no `walk end`**, then the device wedges and
+reboots (`boot_id` changed; dump `dumps/kp_glA9_owner1.gz`). So the hang is
+**before** `[10]/[11]` — i.e. the `[5] retry` trylock loop — and `OWNER0` does not
+help.
