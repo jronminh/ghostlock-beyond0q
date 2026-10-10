@@ -17,6 +17,11 @@ ELF64 AArch64, type EXEC, entry 0x85710000, no section headers (stripped)
 The image is the **uH micro-hypervisor + RKP "app"** (the two loadable segments); on
 Snapdragon it lives in the `hyp` partition (loaded by QHEE — see the Compendium).
 
+Layout: the two segments cover VA `0x85700000`–`0x8577f188`. **All 397 `RKP_` tokens sit
+in segment 1** at file offset `0x10048`–`0x1222e` (VA ≈ `0x8570d048`–`0x8570f22e`) — that
+compact block is the RKP **log/string table**. The image tail after `~0x82200` (≈0.5 MiB) is
+high-entropy (a signature/blob), not code/strings.
+
 ## Log-string scheme (confirmed)
 
 Log strings are not stored in clear; each **token** in a log string is replaced by
