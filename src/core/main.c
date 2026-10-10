@@ -1054,8 +1054,12 @@ static void cli_apply_stop_after(const char *stage) {
     setenv("ONLY_FOPS", "1", 1);
     setenv("CFI_STOP_VERIFY", "1", 1);
   } else if (strcmp(stage, "umh") == 0) {
+    /* stop after the UMH attempt inside try_cfi_stage: without ONLY_FOPS,
+     * run_exploit falls through to the W2 cred phase which resets the device */
+    setenv("ONLY_FOPS", "1", 1);
     setenv("SKIP_CRED", "1", 1);
   } else if (strcmp(stage, "cred") == 0) {
+    setenv("ONLY_FOPS", "1", 1);
     setenv("SKIP_UMH", "1", 1);
   } else if (strcmp(stage, "full") == 0) {
     /* run the whole chain */
