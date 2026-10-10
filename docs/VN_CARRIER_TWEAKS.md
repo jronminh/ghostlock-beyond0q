@@ -15,10 +15,10 @@ G970F (global/VN) firmware.
 ## What works vs what doesn't
 | Feature | Status |
 |---|---|
-| 4G data in VN | ✅ works (insert SIM + set the carrier APN manually) |
-| VoLTE / VoWiFi | ⚠️ not provisioned by the Canada CSC; force with `persist.dbg` overrides (may only surface the toggle — IMS registration can still fail without a VN carrier config) |
+| 4G data in VN | ✅ works (SIM + carrier APN) |
+| VoLTE / VoWiFi | ✅ **works** with the `persist.dbg` overrides — verified on a **Viettel (452 04)** SIM, registered on **LTE**, despite **no Vietnam CSC** |
 | 5G | ❌ S10e is 4G only |
-| Voice calls | ⚠️ if VoLTE can't register and 2G/3G are gone ⇒ calls may fail |
+| Voice calls | ✅ VoLTE voice works (verified on-device) |
 
 ## Enable VoLTE — status: BLOCKED by SELinux
 The intended props are:
@@ -67,7 +67,9 @@ Caveats (learned the hard way):
 **Result (verified):** after the reboot all six props read back `=1`
 (`persist.dbg.volte_avail_ovr`, `persist.dbg.vt_avail_ovr`, `persist.dbg.wfc_avail_ovr`,
 `persist.dbg.ims_volte_enable`, `persist.radio.calls.on.ims`, `persist.radio.jbims`), and
-the rest of the file parsed fine (`persist.sys.locale=vi-VN`).
+the rest of the file parsed fine (`persist.sys.locale=vi-VN`). On a **Viettel (452 04)** SIM
+the phone registered on **LTE** and **VoLTE calls work** (confirmed on-device) — the
+overrides alone were sufficient; **no Vietnam CSC was needed**.
 
 Then reboot and enable *Settings → Connections → Mobile networks → VoLTE calls*.
 
