@@ -204,3 +204,43 @@ Security hardware present (device props):
   Boot ROM + e-fuse root of trust.
 - `security.securehw.available=false` => **no discrete Knox Vault** (S10e 2019 predates it).
 - `security.ASKS.version=6.0`, `security.ADP.version=3.0`, `ro.boot.verifiedbootstate=green`.
+
+## 12. SELinux + persistence hunt (final state)
+SELinux (.config): `SECURITY_SELINUX_DEVELOP=y` (runtime `/sys/fs/selinux/load` +
+enforce toggle possible), `_DISABLE` off, `_BOOTPARAM` off, `DEFAULT="selinux"`.
+- Permissive via `selinux_enforcing=0` is the tool used everywhere (runtime only).
+- Loading a custom policy (`/sys/fs/selinux/load`, needs root) is possible, but RKP is
+  given `selinux.ss_initialized` in `kdp_init` -> risk; and init reloads the ro policy
+  every boot (no persistence).
+- init uses the powerful `u:r:su:s0` domain for a few commands (`init.usb.rc`,
+  `speg_helper.rc`) — a possible context target (untested).
+
+init rc scan (boot-hook hunt) — no clean hook:
+- Every `on property:` action does `copy`/`setprop`/`mkdir`/`start <ro-service>`; no
+  `exec`/service runs from a writable path; all `import`s are ro (`/system`,`/vendor`,
+  `/prism`).
+- `import /prism/etc/init/init.rc` (from `scs.rc`) is dead — no `/prism` partition on
+  this XAC unit (can't create the mountpoint: `/` is ro).
+- Leads: `MyFilter` creates `/data/DownFilters/{Lib,Lib64,Res,Tex,MyFilter}` (downloaded
+  camera filters; some process may `dlopen` `/data/DownFilters/Lib64/*.so` — code-load,
+  likely at camera use, not boot); `security.perf_harden=0` relaxes perf; `u:r:su:s0`.
+
+Persistence conclusion:
+- **Across reboot: no path.** Boot chain is locked (AVB/SVB `green` + `vbmeta locked` +
+  TEE), and unlock is infeasible (`oem_unlock_allowed=0` and not settable even as root;
+  `persistent` obfuscated; no plaintext OEM/KG flag in `param`; no rw-rc boot hook;
+  setuid `su` impossible: `/data` nosuid, `/` ro).
+- **Within a boot: durable** = a resident root daemon (modprobe helper, `init_cred`,
+  RKP-safe) reachable via file channel (`rcmd`/`rout`) or TCP+pty; re-arm per boot needs
+  a userspace agent (an APK, or a DEX + a trigger) — untested whether the exploit runs
+  from an app context (`perf_event_paranoid` / SELinux).
+
+## 13. Bottom line
+- Exploit primitives work (walk+redirect ✅, configfs arbitrary R/W ✅).
+- Root: via `modprobe_path` (RKP-safe) → uid 0 + full caps (userspace); R/W data side used
+  for SELinux off / modprobe_path / core_pattern / kptr.
+- Blocked by design: cred/page-table/.text (RKP + `STRICT_KERNEL_RWX` + `set_memory_rw`
+  vmalloc-only), unsigned modules (`MODULE_SIG_FORCE`), new `/data` files (fscrypt),
+  `/system` (verity), unlock/flash/persistence (TEE + locked bootloader).
+- => A **transient userspace root** (per boot). Kernel-level persistence is out of reach
+  from ring0 on this locked, verified-boot Samsung device.

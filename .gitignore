@@ -16,3 +16,14 @@ _*.tmp
 *.rej
 
 # Ghi chú: dumps (dumps/*.gz) ĐƯỢC track (bằng chứng).
+
+# ROM kernel source đầy đủ (1.5 GB, ~70k file) dùng để build KernelSU — KHÔNG track.
+refs/rom-4.14-full/
+# KernelSU vendored source (14 MB) — KHÔNG track.
+refs/kernelsu/
+# build artifacts / scratch helpers — không track
+mphelper
+getid
+pwn2
+rsd_diag
+glA*
