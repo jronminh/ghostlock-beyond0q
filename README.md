@@ -102,3 +102,9 @@ adb shell 'cat /data/local/tmp/gl.out'          # results
 Commands: `peek <hexaddr> [n]`, `read <hexaddr> <len>`, `write <hexaddr> <hexbytes>`,
 `quit`. Results go to `/data/local/tmp/gl.out`; commands are read from
 `/data/local/tmp/gl.cmd` (consumed+deleted). Auto-exits after ~10 min.
+
+## Authorship
+
+Most of this work — exploit analysis, tooling, documentation, and the on-device
+investigation — was done by the AI assistant **DeepSeek V4.1 Flash** (DeepSeek),
+directed and reviewed by the device owner **jronminh**. See `CREDITS.md`.
