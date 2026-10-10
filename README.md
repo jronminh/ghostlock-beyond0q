@@ -1,4 +1,4 @@
-# ghostlock-beyond0q — GhostLock port for the Samsung **SM-G970W (beyond0q)** device line
+# ghostlock-beyond0q — **deep fork** of GhostLock for the Samsung **SM-G970W (beyond0q)** device line
 
 Local-only repository dedicated to the device we are testing: S10e Snapdragon
 (`beyond0qltecs`), SD855, Linux **4.14.190**, locked bootloader.
@@ -10,8 +10,8 @@ unlock, no KernelSU (`MODULE_SIG_FORCE=y`). Ceiling: `RKP_KDP / DMAP_PROT / CFP`
 
 > NOTE: the commit history in this repo is a **curated reconstruction** built from
 > the sessions documented in `docs/`; it is **not** the original development
-> history. The upstream source repo (OnePlus line) is `ghostlock-oneplus`; this is
-> a device-scoped split for beyond0q.
+> history. The upstream source repo (OnePlus line) is `ghostlock-oneplus`; this is a
+> **deep fork** scoped to beyond0q (the port diverges substantially from upstream).
 
 ## Status (end of session 5)
 
