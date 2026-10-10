@@ -543,6 +543,7 @@ uint64_t find_task_by_tgid(int fd, uint32_t want_tgid);
 int patch_cred_identity(int fd, uintptr_t cred);
 int patch_cred_sid(int fd, uintptr_t cred);
 int patch_cred_object(int fd, uintptr_t cred);
+int repoint_task_cred(int fd, uint32_t tgid, uintptr_t new_cred);
 int install_android_root(int fd);
 void root_shell_daemon(void);
 

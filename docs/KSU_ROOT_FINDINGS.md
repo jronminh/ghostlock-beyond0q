@@ -58,8 +58,9 @@ Run: `env … FORCE_REDIRECT=1 SLIDE=0x… MP_PATH=/data/local/tmp/mphelper \
 ### Open items
 - Daemon command I/O flaky on the socket in the modprobe env (prompt ok, `id` output
   not seen) — `mphelper` now does read-one-line + `sh -c` (built, not re-tested).
-- `/data` **content** writes still fail from kernel-spawned tasks (fscrypt key), only
-  metadata/creation works; sockets are fine.
+- UPDATE (see §6): `/data` **content** writes DO work from the real
+  `call_usermodehelper` (the modprobe helper wrote `mphelper uid=0 …`). The
+  empty-file problem was only the *fake work_struct* UMH path.
 
 ## 4. Building KernelSU (from ROM source `~/ghostlock/src/g9700`)
 - Build with **gcc** (override the Samsung clang wrapper):
@@ -80,10 +81,48 @@ Run: `env … FORCE_REDIRECT=1 SLIDE=0x… MP_PATH=/data/local/tmp/mphelper \
   Full kernel source copied to `refs/rom-4.14-full/` (**gitignored**; NTFS case-collision
   makes a full copy lossy).
 
-## 5. Repo changes this session
+## 6. Arbitrary kernel R/W — capabilities exercised (data side)
+
+Primitive after the walk: redirect `/dev/ashmem` fops → configfs arbitrary
+read/write via `configfs_read_once` / `configfs_write_once`.
+**Gotcha:** in `configfs-only` mode the `pipe_*` helpers are NOT set up — use the
+`configfs_*` primitives. Hooks wired in `src/core/fops.c` (env `MP_PATH`).
+
+| # | Capability | Mechanism | Verified |
+|---|---|---|---|
+| 1 | SELinux off | write 0 → `selinux_enforcing` | ✅ |
+| 2 | `modprobe_path` → root helper | write path; trigger bad-magic exec | ✅ root daemon (`call_usermodehelper`) |
+| 3 | `core_pattern` → root helper | write `|/data/local/tmp/helper` | written ✅ (crash trigger not tuned) |
+| 4 | `kptr_restrict=0` | write 0 → `kptr_restrict` | ⚠️ partial (names visible, addrs hashed) |
+| 5 | **cred repoint → any process root** | task-list walk (configfs reads), write `task->real_cred`/`cred` = `init_cred` | ✅ uid 0 |
+| 6 | full caps / user_ns | implied by #5 (`init_cred` = root + full caps) | ✅ (via #5) |
+
+Key facts:
+- **`call_usermodehelper` (real) DOES write `/data`** — the earlier "kernel-spawned
+  task can't write /data" was specific to the *fake work_struct* UMH. So a
+  `modprobe_path` root process is a fully functional root (reads/writes `/data`).
+- `task->cred` for a live task is a per-task slot; repointing it does not affect
+  other tasks sharing the old cred object.
+- Use the **canonical** `init_cred` (`canon_addr(INIT_CRED)`) as the new pointer.
+- The earlier `cred`-path **wedge came from the W2/pselect write**
+  (`do_one_write(task+TASK_CRED_OFF, "W2", 2)`), NOT from touching cred — an
+  8-byte **configfs** write to `real_cred`/`cred` is stable.
+- `find_task_by_tgid()` in `root.c` uses `pipe_read64` (broken in configfs-only);
+  the configfs-based walk in `repoint_task_cred()` finds tasks fine.
+
+## 7. Frontier: code / rodata (still not reachable)
+`CONFIG_STRICT_KERNEL_RWX=y` → `.text`/`.rodata` are read-only. Data R/W covers
+everything above, but patching code (`module_sig_check`, `sys_call_table`) or
+calling `set_memory_rw` needs either (a) editing the kernel page tables via R/W
+(+ TLB flush problem) or (b) a kernel call primitive. This is the remaining hard
+step for KernelSU-LKM (`CONFIG_MODULE_SIG_FORCE=y`).
+
+## 8. Repo changes this session
 - `main.c` `write_root_script()`: KMI fallback `AVER="android$(getprop ro.build.version.release)"`
   (Samsung `uname -r` has no `androidNN`, old code produced `KMI=-4.14`).
-- `target.h`: `MODPROBE_PATH_OFF 0x029B93C0`.
-- `fops.c`: `MP_PATH` hook (write `modprobe_path` + SELinux off) after redirect verify.
+- `target.h`: `MODPROBE_PATH_OFF 0x029B93C0`, `CORE_PATTERN_OFF 0x029E6120`.
+- `fops.c`: `MP_PATH` hook — write `modprobe_path` + `selinux_enforcing=0` +
+  `kptr_restrict=0` + `core_pattern`, and (env `CRED_TGID`) `repoint_task_cred`.
+- `root.c`: `repoint_task_cred()` (configfs task-list walk + cred pointer write).
 - `primitives/rootshell.c`: daemon handler (diagnostics + read-one-line/`sh -c`).
-- `tools/mphelper.c`, `tools/_build_mphelper.sh`.
+- `tools/mphelper.c`, `tools/_build_mphelper.sh`, `runner.sh`.
