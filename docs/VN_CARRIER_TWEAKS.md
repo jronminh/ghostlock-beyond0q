@@ -73,6 +73,16 @@ overrides alone were sufficient; **no Vietnam CSC was needed**.
 
 Then reboot and enable *Settings → Connections → Mobile networks → VoLTE calls*.
 
+## Durability
+Writing the props into `/data/property/persistent_properties` is exactly how a normal
+`setprop persist.*` is stored, so durability is the same:
+- ✅ **survives reboot** and normal use/updates — init loads the file every boot;
+- ✅ **self-sustaining:** once loaded, the props are in the property service's in-memory
+  map, so any later rewrite of the file keeps them;
+- ❌ lost on **factory reset / data wipe** (`/data` erased) or a **firmware flash** — just
+  re-apply afterwards;
+- root is only needed to *write* the file once; using the props needs no root.
+
 ## IMS + data APN (Viettel / VinaPhone / MobiFone)
 Add manually in *Settings → Connections → Mobile networks → Access Point Names*:
 - the carrier **internet (data)** APN (e.g. `v-internet` / `m3-internet` / `m-wap`),
