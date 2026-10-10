@@ -99,3 +99,37 @@ the clobber harmless (`RB_EMPTY_NODE` + waiter leak), which the session did
 > These do not remove the fundamental race (paint on T's live stack); they restore
 > the timing the 14/16 build had. A durable fix would need T to stay inside the
 > kernel without reusing the waiter's bytes — no such syscall was found on this ROM.
+
+## Confirmed on device (2026-10-10, redirect-only run `glA9`, slide 0x220000)
+
+First end-to-end confirmation of *where* it dies, from the watchdog dump
+`dumps/kp_glA9_wedge.gz`:
+
+- Before the reset: `top` showed `%sys` climbing 500% → 704% (≈7/8 CPUs),
+  load `84`, many `kworker`/`kworker`+`jbd2` D-state, no Oops.
+- The dump contains the RCU stall trace:
+
+```
+glA9:13990] INFO: rcu_preempt self-detected stall on CPU
+Task dump for CPU 1:
+ glA9  R running task  0 13990 11986 0x00000202
+ Call trace:
+  ...
+  gic_handle_irq
+  el1_irq
+  _raw_spin_unlock_irq+0x20/0x58
+  rt_mutex_adjust_prio_chain+0x1dc/0x830
+  rt_mutex_adjust_pi+0xa0/0xb8
+  __sched_setscheduler+0x890/0xab0
+  SyS_sched_setattr+0x2c8/0x358
+```
+
+So the **consumer thread is stuck looping inside `rt_mutex_adjust_prio_chain`**
+(+0x1dc, on the `_raw_spin_unlock_irq` path = the `[5] retry` loop where
+`raw_spin_trylock(&lock->wait_lock)` keeps failing, or the rb-tree walk). This is
+the **soft-lockup / livelock** branch of the `PHIEN §9.3` analysis, NOT the
+`rb_erase` Oops. It stalls RCU on CPU 1, spreads, and the watchdog reboots the
+device (`boot_id` changed, uptime reset). The device recovered on its own.
+
+⇒ **The failing step is FLOW 2.14 (the PI walk)**, and the concrete failure is an
+infinite loop in `rt_mutex_adjust_prio_chain`, not a bad write target.
