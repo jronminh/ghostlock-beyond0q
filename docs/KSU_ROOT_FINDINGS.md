@@ -117,6 +117,17 @@ calling `set_memory_rw` needs either (a) editing the kernel page tables via R/W
 (+ TLB flush problem) or (b) a kernel call primitive. This is the remaining hard
 step for KernelSU-LKM (`CONFIG_MODULE_SIG_FORCE=y`).
 
+## 9. Usable root channel (VERIFIED)
+The `modprobe_path` helper runs a **file-driven root command loop** (see
+`tools/mphelper.c`): write a command to `/data/local/tmp/rcmd`; the helper
+executes `sh -c <cmd>` as root and writes output to `/data/local/tmp/rout`.
+```
+$ echo id > /data/local/tmp/rcmd; sleep 3; cat /data/local/tmp/rout
+uid=0(root) gid=0(root) groups=0(root) context=u:r:kernel:s0
+```
+Root-only paths work (`ls -l /data/adb` succeeds; the shell gets EACCES).
+This is a stable, usable full-root channel without touching code/rodata.
+
 ## 8. Repo changes this session
 - `main.c` `write_root_script()`: KMI fallback `AVER="android$(getprop ro.build.version.release)"`
   (Samsung `uname -r` has no `androidNN`, old code produced `KMI=-4.14`).
