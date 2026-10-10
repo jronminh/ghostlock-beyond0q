@@ -126,6 +126,16 @@
 #endif
 #endif
 
+/* Runtime log level: 0=quiet, 1=info (default), 2=debug.
+ * pr_debug() is for logs inside the PI-walk window: a printf()+fsync() there runs
+ * on the caller's kernel stack and delays the walk, which lets an IRQ clobber the
+ * painted rt_mutex_waiter (the panic root cause). Keep these OFF unless debugging. */
+extern int dn_log_level;
+#define pr_debug(fmt, ...) do { \
+        if (dn_log_level >= 2) \
+            printf(COLOR_YELLOW "[d] " COLOR_DEFAULT fmt, ##__VA_ARGS__); \
+    } while (0)
+
 #define wait_input(fmt, ...) do { \
         pr_info(fmt, ##__VA_ARGS__); getchar(); \
     } while (0)

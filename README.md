@@ -66,3 +66,16 @@ adb shell "cd /data/local/tmp && ONLY_FOPS=1 CFI_STOP_VERIFY=1 SSOPT_EMPTY=1 SSO
 - Identify dumps by **process name** (`ghostlockXX`), **not** filename — labels
   have been wrong before (see `AUDIT_PHIEN5.md §2.1`).
 - Never touch bootloader/partition/flash; avoid `adb uninstall`.
+
+## CLI & log levels (session 5 refactor)
+
+The driver keeps its env flags, and adds a thin CLI:
+- `--log=quiet|info|debug` (or `DN_LOG`), default `info`. `debug` enables the
+  **timing-sensitive walk logs** (`consumer: walk begin/end` + `fsync`) that are
+  otherwise OFF to avoid clobbering the painted waiter during the walk.
+- `--stop-after=redirect|verify|umh|cred|full` — maps onto the old env flags:
+  `redirect`→`ONLY_FOPS`, `verify`→`ONLY_FOPS`+`CFI_STOP_VERIFY`,
+  `umh`→`SKIP_CRED`, `cred`→`SKIP_UMH`, `full`→none.
+- Default `SSOPT_HOLD` is now **0** (the `select()` hold overwrites the waiter).
+
+Build from this repo (source of truth): `bash tools/build14.sh /tmp/glXX`.

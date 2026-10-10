@@ -658,7 +658,7 @@ void do_setsockopt_fake_lock_route(void) {
             "no_prio=%d lockprobe=%d\n",
             fops_elapsed_ms(&t0), attempt, fake_task, fake_lock, sizeof buf,
             env_flag("SSOPT_SCAN", 0), env_flag("SSOPT_BASELINE", 0),
-            env_flag("SSOPT_HOLD", 1), env_flag("SSOPT_QUIET_EXIT", 1),
+            env_flag("SSOPT_HOLD", 0), env_flag("SSOPT_QUIET_EXIT", 1),
             env_flag("SSOPT_OWNER0", 1), env_flag("SSOPT_NO_TREE", 0),
             env_flag("SSOPT_NO_PRIO", 0), env_flag("SSOPT_LOCKPROBE", 0));
     (void)0;
@@ -708,7 +708,7 @@ void do_setsockopt_fake_lock_route(void) {
      * kpr/kpP/kpPB; silent bail in PA/QA; hang in the delay=0 run).  Blocked in
      * select(), IRQ frames land far below the current frame and the paint is
      * frozen.  Timeout is well above the consumer's 20 ms delay. */
-    if (env_flag("SSOPT_HOLD", 1) && ssopt_hold_r >= 0 && ssopt_hold_r < 64) {
+    if (env_flag("SSOPT_HOLD", 0) && ssopt_hold_r >= 0 && ssopt_hold_r < 64) {
       fd_set h_in, h_out, h_ex;
       FD_ZERO(&h_in); FD_ZERO(&h_out); FD_ZERO(&h_ex);
       FD_SET(ssopt_hold_r, &h_in);          /* empty pipe: never ready */
@@ -716,7 +716,7 @@ void do_setsockopt_fake_lock_route(void) {
       select(64, &h_in, &h_out, &h_ex, &h_tv);
     }
     for (int spin = 0;
-         spin < (env_flag("SSOPT_HOLD", 1) ? 100000000 : 2000000000) &&
+         spin < (env_flag("SSOPT_HOLD", 0) ? 100000000 : 2000000000) &&
            !atomic_load(&pselect_walk_done);
          spin++) {
       __asm__ volatile("yield" ::: "memory");
