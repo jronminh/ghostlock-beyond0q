@@ -37,21 +37,17 @@ Full detail: `docs/KSU_ROOT_FINDINGS.md` (sections 1-13 — the main findings, E
 
 ```
 README.md
-docs/            # handoff, prompts, session notes, audit (.md)
-src/             # exploit source
-  core/          # route + payload builders (single timing-critical process)
-  primitives/    # rootshell.c (root shell daemon, shared driver + payload)
-  payload/       # dnroot.c  -> separate `dnroot` UMH payload binary
-  tools/         # glshell.c -> in-process debug shell over the live gadget
-  devices/beyond0q/offsets.h     <-- this device line
+LICENSE                 # GPL-2.0
+docs/                   # English technical docs (findings, flow, run config)
+src/                    # exploit source
+  core/                 # route + payload builders (single timing-critical process)
+  primitives/           # rootshell.c (root shell daemon; shared driver + payload)
+  payload/              # dnroot.c -> the separate `dnroot` UMH payload binary
+  tools/                # glshell.c -> in-process debug shell over the live gadget
+  devices/beyond0q/     # this device line (offsets.h)
+refs/rom-4.14/          # ROM kernel source subset (reference)
 tools/
-  probes/        # probe_*.c (measure 4.14 layouts: task_struct/cred/mm/kmem/dt/umh)
-  build14.sh     # build (WSL) -> *_a64
-  analysis/      # kp_scan.py + _dn_*.py/sh (dump reading, measurement, patching)
-  scripts/       # other helper scripts (.py/.sh/.ps1/.c/.h)
-  refs/          # kallsyms_fixed.txt (image symbol reference)
-dumps/           # panic/hang captures (kp*.gz) + index
-logs/            # exploit stdout logs (gl*.log, _dn_e2e*.log)
+  build14.sh            # build (WSL) -> *_a64 (driver) + *_dnroot_a64 (payload)
 ```
 
 ## Build & run (WSL)
