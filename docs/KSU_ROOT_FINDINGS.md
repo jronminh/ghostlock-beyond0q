@@ -152,3 +152,30 @@ holds the fscrypt key (or pre-warm each target inode).
 - `root.c`: `repoint_task_cred()` (configfs task-list walk + cred pointer write).
 - `primitives/rootshell.c`: daemon handler (diagnostics + read-one-line/`sh -c`).
 - `tools/mphelper.c`, `tools/_build_mphelper.sh`, `runner.sh`.
+
+## 10. Samsung protection stack vs "root" (survey)
+Kernel knobs / symbols / device state:
+- RKP: `CONFIG_UH_RKP`, `RKP_KDP`, `RKP_NS_PROT`, `RKP_DMAP_PROT`, `RKP_CFP`(+JOPP/ROPP) —
+  partly **EL3/TEE**. Symbols: `rkp_*`, `security_integrity_current`.
+- `CONFIG_SECURITY_DEFEX` (Samsung exec LSM), `CONFIG_FIVE`, `CONFIG_DM_VERITY`(+FEC).
+- `CONFIG_MODULE_SIG_FORCE`, `CONFIG_STRICT_KERNEL_RWX`, `CONFIG_KNOX_NCM`, `ro.config.knox=v30`.
+- Device: `ro.boot.verifiedbootstate=green`, `vbmeta.device_state=locked`, `flash.locked=1`,
+  `warranty_bit=0`, `sys.oem_unlock_allowed=0`, `ro.oem_unlock_supported=1`.
+
+Why uid 0 does NOT break them — the protections are not at ring0:
+- **Above the kernel (TEE/EL3)**: RKP/KNOX/Keymaster — the kernel cannot touch them, and
+  RKP *watches* the kernel. Observed panic: `RKP CRED PROTECTION VIOLATION
+  PC:security_integrity_current+0x448` (reset log `/data/log/power_off_reset_reason.txt`)
+  after a cred repoint. => do NOT modify `cred`/task_struct/page tables.
+- **Before the kernel (bootloader + AVB/SVB)**: verifies the boot image every boot; root
+  cannot influence the next boot.
+- **Enforced by ring0 itself**: STRICT_KERNEL_RWX (text RO), MODULE_SIG (unsigned module
+  rejected), dm-verity (block RO), fscrypt (needs the key).
+- **Unlock flag**: `oem_unlock_supported=1` but `sys.oem_unlock_allowed=0` and it is NOT
+  settable even as root; `persistent` block is obfuscated and `param` has no plaintext
+  OEM/KG flags => **runtime bootloader unlock infeasible** => no flashed persistence.
+
+Achievable (runtime, data-only, RKP-safe): SELinux off, modprobe_path/core_pattern,
+kptr_restrict, and **root via the modprobe helper** (uid 0, full caps) — a transient
+userspace root. Not achievable: cred/keyring/page-table edits (RKP), unsigned modules,
+code patches, new `/data` files (fscrypt), `/system` writes (verity), persistence.
