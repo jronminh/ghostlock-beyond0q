@@ -31,3 +31,7 @@ glA*
 # evidence / session logs — not published
 dumps/
 recovered/
+
+# only tools/build14.sh is published; the rest of tools/ is local scratch
+tools/*
+!tools/build14.sh
