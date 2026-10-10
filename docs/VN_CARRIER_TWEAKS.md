@@ -36,12 +36,33 @@ But the root obtained here runs in SELinux domain **`u:r:kernel:s0`**, and the
 `Failed to set property …`. There is **no Magisk-style userspace root** on this device
 (locked bootloader + RKP + `user` build), so the framework props can't be set live.
 
-The only reachable alternative is appending the entries to the (writable)
-`/data/property/persistent_properties` protobuf, which would apply them on the **next
-boot** — however the live property service keeps that file authoritative and may rewrite
-it before a reboot. Not implemented as a one-shot yet.
+### Reachable alternative: write the persisted props directly (data layer)
+`setprop` is blocked, but the **persisted-property file itself is writable** by the
+kernel-domain root (it is an *existing* file, so fscrypt's key is cached):
 
-Once the props *are* set (by any means), reboot and enable
+```
+/data/property/persistent_properties     # root:root 0600, an Android protobuf
+```
+
+Format = a flat concatenation of entries `0a <len> 0a <namelen> <name> 12 <vallen>
+<value>` (one per `persist.*` prop). Appending the six entries sets those props **on the
+next boot** (init loads the file). `scripts/pptool.py` parses it and emits the append bytes:
+
+```
+python3 scripts/pptool.py dump <b64dump>     # list existing entries
+python3 scripts/pptool.py mkapp  app.b64     # base64 of the 6 VoLTE entries
+```
+
+On device, as root: `base64 -d app.b64 >> /data/property/persistent_properties`.
+
+Caveats (learned the hard way):
+- **One root daemon only.** Several daemons race on `rcmd` and interleave the concurrent
+  appends, which *corrupts* the protobuf (keep a backup of the original file).
+- The live property service rewrites the file on changes/shutdown, so **restart hard**
+  (the `reboot(2)` syscall — `tools/scripts/hreboot.c`) so it cannot clobber the append;
+  `sync()` first.
+
+Once the props are set, reboot and enable
 *Settings → Connections → Mobile networks → VoLTE calls*.
 
 ## IMS + data APN (Viettel / VinaPhone / MobiFone)
