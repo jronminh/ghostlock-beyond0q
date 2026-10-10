@@ -174,6 +174,12 @@ Kernel knobs / symbols / device state:
 - RKP: `CONFIG_UH_RKP`, `RKP_KDP`, `RKP_NS_PROT`, `RKP_DMAP_PROT`, `RKP_CFP`(+JOPP/ROPP) —
   partly **EL3/TEE**. Symbols: `rkp_*`, `security_integrity_current`.
 - `CONFIG_SECURITY_DEFEX` (Samsung exec LSM), `CONFIG_FIVE`, `CONFIG_DM_VERITY`(+FEC).
+  - **DEFEX, observed:** an `execve()` of a binary under `/data/local/tmp` started by a
+    **uid 0** process is blocked and the child is **SIGKILLed**:
+    `defex: safeplace violation [task=sh (/system/bin/sh), child=/data/local/tmp/<x>, uid=0]`.
+    Non-root (`shell`) execs from `/data/local/tmp` succeed, and the kernel-spawned
+    modprobe helper runs — so DEFEX specifically walls off *root userspace exec* from
+    non-"safe" paths on this build.
 - `CONFIG_MODULE_SIG_FORCE`, `CONFIG_STRICT_KERNEL_RWX`, `CONFIG_KNOX_NCM`, `ro.config.knox=v30`.
 - Device: `ro.boot.verifiedbootstate=green`, `vbmeta.device_state=locked`, `flash.locked=1`,
   `warranty_bit=0`, `sys.oem_unlock_allowed=0`, `ro.oem_unlock_supported=1`.

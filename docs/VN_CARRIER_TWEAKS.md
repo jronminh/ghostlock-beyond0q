@@ -58,12 +58,18 @@ On device, as root: `base64 -d app.b64 >> /data/property/persistent_properties`.
 Caveats (learned the hard way):
 - **One root daemon only.** Several daemons race on `rcmd` and interleave the concurrent
   appends, which *corrupts* the protobuf (keep a backup of the original file).
-- The live property service rewrites the file on changes/shutdown, so **restart hard**
-  (the `reboot(2)` syscall — `tools/scripts/hreboot.c`) so it cannot clobber the append;
-  `sync()` first.
+- After appending, **reboot**. A plain `adb reboot` turned out to be enough — the property
+  service did **not** clobber the appended entries on shutdown. (Trying to force a harder
+  restart with a helper binary in `/data/local/tmp` failed for a different reason: **DEFEX**
+  killed it — `defex: safeplace violation … uid=0` → SIGKILL; see
+  `docs/KSU_ROOT_FINDINGS.md` §10.)
 
-Once the props are set, reboot and enable
-*Settings → Connections → Mobile networks → VoLTE calls*.
+**Result (verified):** after the reboot all six props read back `=1`
+(`persist.dbg.volte_avail_ovr`, `persist.dbg.vt_avail_ovr`, `persist.dbg.wfc_avail_ovr`,
+`persist.dbg.ims_volte_enable`, `persist.radio.calls.on.ims`, `persist.radio.jbims`), and
+the rest of the file parsed fine (`persist.sys.locale=vi-VN`).
+
+Then reboot and enable *Settings → Connections → Mobile networks → VoLTE calls*.
 
 ## IMS + data APN (Viettel / VinaPhone / MobiFone)
 Add manually in *Settings → Connections → Mobile networks → Access Point Names*:
