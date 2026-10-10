@@ -179,3 +179,28 @@ Achievable (runtime, data-only, RKP-safe): SELinux off, modprobe_path/core_patte
 kptr_restrict, and **root via the modprobe helper** (uid 0, full caps) — a transient
 userspace root. Not achievable: cred/keyring/page-table edits (RKP), unsigned modules,
 code patches, new `/data` files (fscrypt), `/system` writes (verity), persistence.
+
+## 11. RKP internals (from source) + security hardware
+RKP is TZ/secure-world firmware, driven by the kernel over **SMC** (`uh_call`, `smc 0`).
+`include/linux/rkp.h`:
+- Commands: `RKP_WRITE_PGT1/2/3`, `RKP_NEW_PGD`, `RKP_FREE_PGD`, `RKP_EMULT_TTBR0/1`
+  (RKP **owns/shadows the kernel page tables**); `RKP_JOPP_INIT`, `RKP_ROPP_INIT/SAVE/RELOAD`
+  (control-flow protection); `RKP_MODULE_LOAD`, `RKP_BFP_LOAD`, `RKP_KASLR_MEM`, `RKP_FIMC_VERIFY`.
+- `struct kdp_init_struct` hands RKP the exact offsets it guards:
+  `uid_cred/euid_cred/gid_cred/egid_cred/type_cred/security_cred/usage_cred`,
+  `bp_cred_secptr`, `cred_task/mm_task/pid_task/rp_task/comm_task`, `task_threadinfo`,
+  `pgd_mm`, `selinux{ss_initialized}`, `verifiedbootstate`.
+- `struct rkp_init` gives RKP `_text/_etext`, `_srodata/_erodata`, `init_mm_pgd`,
+  `physmap_addr`, page-table bitmaps (`rkp_pgt_bitmap`, `rkp_s_bitmap_ro/dbl`).
+- `CRED_JAR_RO "cred_jar_ro"` — RKP makes the **cred slab read-only**.
+- Helpers `rkp_is_pg_protected()`, `rkp_is_pg_dbl_mapped()`, `is_rkp_ro_page()`.
+=> RKP deliberately protects **cred, `.text`/`.rodata`, page tables, selinux state,
+module/BPF loads, and control flow**. Editing any of those => panic
+(`security_integrity_current`). Normal `.data` (modprobe_path/core_pattern/
+selinux_enforcing/kptr_restrict) is outside RKP's list -> writable.
+
+Security hardware present (device props):
+- **TrustZone/TEE** (RKP + KNOX TEE), **Qualcomm SPU**, **eSE** (`ro.security.ese.cosname=JCOP4.0_0050534A`),
+  Boot ROM + e-fuse root of trust.
+- `security.securehw.available=false` => **no discrete Knox Vault** (S10e 2019 predates it).
+- `security.ASKS.version=6.0`, `security.ADP.version=3.0`, `ro.boot.verifiedbootstate=green`.
