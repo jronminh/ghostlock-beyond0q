@@ -53,3 +53,49 @@ Open questions / risks:
   ceiling).
 - Their per-boot probabilistic retries versus this port's current
   `--stop-after=verify` flow.
+
+## Survey findings (prerequisites)
+
+Local (WSL), present:
+
+- `~/ghostlock/kernel/`: `Image`, `vmlinux.elf`, `kallsyms_fixed.txt`.
+- `~/ghostlock/src/g9700/`: the full 4.14 ROM source, plus `out/.config` and
+  `arch/arm64/configs/beyond0qlte_can_single_defconfig`.
+- Tooling: `vmlinux-to-elf`, `aarch64-linux-gnu-nm`, `lz4`, `xxd`.
+  Missing (needed only for the upstream BTF step): `samloader` /
+  `samloader-rs`, `llvm-nm`, `pahole`, `bpftool`.
+- `refs/rom-4.14-full`, `refs/kernelsu` (local, gitignored).
+
+Device (`4.14.190-23725627-abG970WVLU9IXE1`):
+
+- `CONFIG_MODULE_SIG_FORCE=y` (with `MODULE_SIG_ALL=y`, SHA512).
+- `CONFIG_UH_RKP=y`, `CONFIG_SECURITY_DEFEX=y`, `CONFIG_FIVE=y`,
+  `CONFIG_STRICT_KERNEL_RWX=y`, `CONFIG_MODVERSIONS=y`, `CONFIG_KALLSYMS_ALL=y`,
+  `CONFIG_RANDOMIZE_BASE=y`.
+- `CONFIG_DM_VERITY=y` (+FEC), `CONFIG_FSCRYPT_SDP=y`.
+- SELinux `DEVELOP=y`; no `BOOTPARAM`, no `DISABLE`.
+- `perf_event_paranoid=-1`, `security.perf_harden=1`.
+- `/dev/ashmem` plus a per-boot `ashmem<bootid>` node (libcutils).
+- tracefs mounted at `/sys/kernel/tracing` and `/sys/kernel/debug/tracing`.
+- No BTF (`CONFIG_DEBUG_INFO=y`, `CONFIG_DEBUG_INFO_BTF` absent).
+
+CVE presence and layout:
+
+- `kernel/locking/rtmutex.c:1068 remove_waiter()` uses `current->pi_lock` and
+  `current->pi_blocked_on = NULL` (the vulnerable form); CVE-2026-43499 is
+  present and unpatched on this build.
+- 4.14 `struct rt_mutex_waiter` (`kernel/locking/rtmutex_common.h:27`):
+  `tree_entry@0x00`, `pi_tree_entry@0x18`, `task@0x30`, `lock@0x38`,
+  `prio@0x40`, `deadline@0x48` (size 0x50) — matches
+  `src/devices/beyond0q/offsets.h`.
+
+Consequences:
+
+- Offsets can be derived fully offline from `vmlinux.elf`, `kallsyms_fixed.txt`
+  and a `struct` probe; no sampler is needed, and the upstream BTF step does not
+  apply to this build.
+- The app-domain route depends on the physical-P0 oracle; the base exploit is
+  already cloned at `~/ghostlock/smt878u-ionstack-poc`.
+- KernelSU is gated by `MODULE_SIG_FORCE`; the manual late-load loader is the
+  only lead, and 4.14 has no BTF and may need a call/relocation primitive this
+  data-only port does not have.
