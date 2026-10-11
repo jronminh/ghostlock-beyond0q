@@ -36,6 +36,11 @@ modifications. Verified method: configfs arbitrary R/W + **`modprobe_path`** roo
   AVC reloads: `property_service` now accepts `setprop` from `u:r:kernel:s0`
   (`avc ... permissive=1`). KDP is **not** tripped. `settings`/`app_process` stay
   blocked by DEFEX. See `docs/SELINUX_USERSYNC.md`.
+- **Root UI (session 8):** `mpnl` is also a **localhost HTTP server** on
+  `127.0.0.1:8080` serving an **embedded** single-page app (`src/primitives/webui.html`)
+  — drive root commands, `setprop`, and `cmd`-based tweaks from **Chrome on the
+  device** (no PC, no APK). Arm with `scripts/arm_root.sh`; verify with
+  `scripts/ui_selftest.sh`. See `docs/ROOT_UI.md`.
 
 Full detail: `docs/KSU_ROOT_FINDINGS.md` (sections 1-13 — the main findings, English),
 `docs/FLOW_DEBUG.md`, `docs/ROM_MECHANISM_4.14.md`, `docs/RUN_CONFIG.md`,
@@ -49,7 +54,7 @@ LICENSE                 # GPL-2.0
 docs/                   # English technical docs (findings, flow, run config)
 src/                    # exploit source
   core/                 # route + payload builders (single timing-critical process)
-  primitives/           # rootshell.c (root shell daemon; shared driver + payload)
+  primitives/           # rootshell.c (root shell daemon), mpnl.c + webui.html (root UI)
   payload/              # dnroot.c -> the separate `dnroot` UMH payload binary
   tools/                # glshell.c -> in-process debug shell over the live gadget
   devices/beyond0q/     # this device line (offsets.h)

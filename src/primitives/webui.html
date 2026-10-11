@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ghostlock root</title>
+<style>
+  :root { --bg:#0d1117; --card:#161b22; --line:#30363d; --fg:#e6edf3;
+          --muted:#8b949e; --acc:#2f81f7; --ok:#3fb950; --bad:#f85149; --warn:#d29922; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:15px/1.45 -apple-system,system-ui,"Segoe UI",Roboto,sans-serif; }
+  header { position:sticky; top:0; background:#0d1117ee; backdrop-filter:blur(8px);
+           border-bottom:1px solid var(--line); padding:10px 14px; z-index:9; }
+  h1 { font-size:16px; margin:0 0 6px; font-weight:600; letter-spacing:.2px; }
+  h1 small { color:var(--muted); font-weight:400; font-size:12px; }
+  .pill { display:inline-block; font-size:11px; padding:2px 8px; border-radius:999px;
+          border:1px solid var(--line); margin:0 4px 4px 0; color:var(--muted); }
+  .pill.ok { color:var(--ok); border-color:#238636; }
+  .pill.bad { color:var(--bad); border-color:#6e2c2c; }
+  main { padding:12px 14px 40px; max-width:820px; margin:0 auto; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px;
+          padding:12px 14px; margin:0 0 12px; }
+  .card h2 { font-size:13px; text-transform:uppercase; letter-spacing:.6px;
+             color:var(--muted); margin:0 0 10px; font-weight:600; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin:6px 0; }
+  label { color:var(--muted); font-size:13px; }
+  input, select { background:#0d1117; color:var(--fg); border:1px solid var(--line);
+                  border-radius:7px; padding:8px 10px; font-size:14px; flex:1 1 120px; min-width:0; }
+  button { background:#21262d; color:var(--fg); border:1px solid var(--line);
+           border-radius:7px; padding:8px 12px; font-size:14px; cursor:pointer; }
+  button:active { background:#30363d; }
+  button.acc { background:#1f6feb; border-color:#1f6feb; color:#fff; }
+  button.danger { color:var(--bad); }
+  button.ok { color:var(--ok); }
+  pre { background:#010409; border:1px solid var(--line); border-radius:8px;
+        padding:10px; font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;
+        white-space:pre-wrap; word-break:break-word; max-height:260px; overflow:auto; margin:8px 0 0; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:6px; }
+  .pkg { display:flex; justify-content:space-between; align-items:center; gap:6px;
+         border:1px solid var(--line); border-radius:7px; padding:6px 8px; font-size:12.5px; }
+  .pkg span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .pkg button { padding:4px 8px; font-size:12px; }
+  .kv { display:grid; grid-template-columns:auto 1fr; gap:2px 12px; font-size:13px; }
+  .kv b { color:var(--muted); font-weight:500; }
+  .hint { color:var(--muted); font-size:12px; margin:6px 0 0; }
+  .toast { position:fixed; left:50%; bottom:18px; transform:translateX(-50%);
+           background:#1f6feb; color:#fff; padding:8px 14px; border-radius:8px;
+           font-size:13px; opacity:0; transition:opacity .2s; pointer-events:none; }
+  .toast.show { opacity:1; }
+</style>
+</head>
+<body>
+<header>
+  <h1>ghostlock root <small id="ver">__GL_VERSION__</small></h1>
+  <div id="pills"><span class="pill">connecting…</span></div>
+</header>
+<main>
+
+  <div class="card">
+    <h2>Status</h2>
+    <div class="kv" id="status"><b>state</b><span>loading…</span></div>
+    <div class="row" style="margin-top:10px">
+      <button class="acc" onclick="refresh()">Refresh</button>
+      <button onclick="run('getenforce; cat /sys/fs/selinux/enforce')">Re-check SELinux</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Quick tweaks</h2>
+    <div class="row">
+      <label style="flex:0 0 auto">DPI</label>
+      <input id="dpi" type="number" min="240" max="720" step="10" value="420" style="flex:0 1 100px">
+      <button onclick="run('cmd window density '+num('dpi'))">Apply DPI</button>
+      <button onclick="run('cmd window density reset')">Reset DPI</button>
+    </div>
+    <div class="row">
+      <label style="flex:0 0 auto">Anim</label>
+      <button onclick="anim(0)">Off</button>
+      <button onclick="anim(0.5)">0.5x</button>
+      <button onclick="anim(1)">1x</button>
+    </div>
+    <div class="row">
+      <button onclick="run('cmd settings put system screen_off_timeout 600000')">Screen 10 min</button>
+      <button onclick="run('cmd settings put system show_touches 1')">Show touches ON</button>
+      <button onclick="run('cmd settings put system show_touches 0')">Show touches OFF</button>
+      <button onclick="run('cmd settings put global stay_on_while_plugged_in 3')">Stay awake ON</button>
+    </div>
+    <div class="row">
+      <button onclick="run('cmd settings put global development_settings_enabled 1')">Dev options</button>
+      <button onclick="run('cmd settings put secure adaptive_sleep 0')">Adaptive sleep OFF</button>
+      <button onclick="run('/data/local/tmp/root_tweaks.sh 2>/dev/null || cmd window density 420')">Preset (420/0.5)</button>
+    </div>
+    <p class="hint">Runs as uid 0 through the safeplace <code>cmd</code> dispatcher (DEFEX-safe).</p>
+  </div>
+
+  <div class="card">
+    <h2>Persistent properties</h2>
+    <div class="row">
+      <input id="pname" placeholder="persist.sys.timezone" value="persist.sys.timezone">
+      <input id="pval" placeholder="Asia/Ho_Chi_Minh" value="Asia/Ho_Chi_Minh">
+      <button class="acc" onclick="setprop()">Set</button>
+      <button onclick="getprop()">Get</button>
+    </div>
+    <div class="row">
+      <button onclick="setpropV('persist.dbg.volte_avail_ovr','1')">VoLTE ovr</button>
+      <button onclick="setpropV('persist.dbg.vt_avail_ovr','1')">VT ovr</button>
+      <button onclick="setpropV('persist.dbg.wfc_avail_ovr','1')">WiFi-Call ovr</button>
+      <button onclick="setpropV('persist.sys.locale','vi-VN')">Locale vi-VN</button>
+    </div>
+    <p class="hint">setprop works because the daemon synced SELinux to real permissive.
+       Values under <code>persist.*</code> survive reboot via persistent_properties.</p>
+  </div>
+
+  <div class="card">
+    <h2>Packages / debloat</h2>
+    <div class="row">
+      <input id="pkg" placeholder="com.facebook.katana">
+      <button class="acc" onclick="pkgOp('disable')">Disable</button>
+      <button class="ok" onclick="pkgOp('enable')">Enable</button>
+    </div>
+    <div class="row">
+      <button onclick="pkgList()">List candidates</button>
+      <span class="hint" id="pkghint"></span>
+    </div>
+    <div id="pkglist" class="grid"></div>
+  </div>
+
+  <div class="card">
+    <h2>Root command</h2>
+    <div class="row">
+      <input id="cmdline" placeholder="id; getprop ro.build.version.release">
+      <button class="acc" onclick="runCmd()">Run</button>
+    </div>
+    <div id="console"></div>
+  </div>
+
+</main>
+<div class="toast" id="toast"></div>
+<script>
+const TOKEN = "__GL_TOKEN__";
+const $ = id => document.getElementById(id);
+
+function esc(s){ return (s==null?'':String(s)).replace(/[&<>]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+function show(msg){ const t=$('toast'); t.textContent=msg; t.classList.add('show');
+                    clearTimeout(t._h); t._h=setTimeout(()=>t.classList.remove('show'),1600); }
+
+async function api(op, params){
+  const body = new URLSearchParams(params||{});
+  const r = await fetch('/api/'+op, {method:'POST',
+    headers:{'X-GL-Token':TOKEN,'Content-Type':'application/x-www-form-urlencoded'}, body});
+  if(!r.ok) throw new Error('HTTP '+r.status);
+  return r.json();
+}
+
+function logOut(title, text){
+  const d=document.createElement('pre');
+  d.textContent = (title?('$ '+title+'\n'):'') + (text||'');
+  $('console').prepend(d);
+  while($('console').childElementCount>12) $('console').lastChild.remove();
+}
+
+async function run(cmd){
+  try { const r = await api('exec',{cmd}); logOut(cmd, r.out + '\n[rc='+r.rc+']'); }
+  catch(e){ logOut(cmd, 'error: '+e.message); }
+}
+function num(id){ return $(id).value; }
+function runCmd(){ const c=$('cmdline').value.trim(); if(c) run(c); }
+function anim(v){ run('cmd settings put global window_animation_scale '+v+'; '+
+                     'cmd settings put global transition_animation_scale '+v+'; '+
+                     'cmd settings put global animator_duration_scale '+v); }
+
+async function refresh(){
+  try {
+    const s = await api('status');
+    $('status').innerHTML =
+      '<b>uid</b><span>'+esc(s.uid)+' (euid '+esc(s.euid)+')</span>'+
+      '<b>context</b><span>'+esc(s.ctx)+'</span>'+
+      '<b>selinux</b><span>'+esc(s.selinux)+' (enforce='+esc(s.enforce)+')</span>'+
+      '<b>boot_id</b><span>'+esc(s.boot_id)+'</span>'+
+      '<b>pid</b><span>'+esc(s.pid)+'</span>';
+    $('pills').innerHTML =
+      '<span class="pill ok">root armed</span>'+
+      '<span class="pill '+(String(s.enforce)==='0'?'ok':'bad')+'">selinux '+esc(s.selinux)+'</span>'+
+      '<span class="pill">'+esc(s.ctx)+'</span>';
+    $('ver').textContent = s.version;
+  } catch(e){
+    $('pills').innerHTML = '<span class="pill bad">daemon down</span>';
+  }
+}
+
+async function setprop(){ const n=$('pname').value.trim(), v=$('pval').value;
+  try { const r=await api('prop',{op:'set',name:n,value:v}); show(r.ok?'set '+n:'failed'); logOut('setprop '+n+' '+v, r.out||('rc='+r.rc)); }
+  catch(e){ show(e.message); } }
+async function getprop(){ const n=$('pname').value.trim();
+  try { const r=await api('prop',{op:'get',name:n}); logOut('getprop '+n, r.value); }
+  catch(e){ show(e.message); } }
+function setpropV(n,v){ $('pname').value=n; $('pval').value=v; setprop(); }
+
+async function pkgOp(op){ const p=$('pkg').value.trim(); if(!p) return;
+  try { const r=await api('pkg',{op, pkg:p}); show(op+' '+p); logOut('pkg '+op+' '+p, r.out||('rc='+r.rc)); pkgList(); }
+  catch(e){ show(e.message); } }
+
+const CAND = ['com.facebook.katana','com.facebook.system','com.facebook.appmanager',
+  'com.facebook.services','com.samsung.android.bixby.agent','com.samsung.android.bixby.wakeup',
+  'com.samsung.android.game.gamehome','com.samsung.android.app.spage','com.samsung.android.app.tips',
+  'com.samsung.android.ardrawing','com.samsung.android.aremoji','com.microsoft.skydrive'];
+async function pkgList(){
+  try { const r = await api('exec',{cmd:'cmd package list packages'});
+        const all = new Set((r.out||'').split('\n').map(l=>l.replace(/^package:/,'').trim()));
+        const present = CAND.filter(p=>all.has(p));
+        $('pkghint').textContent = present.length+'/'+CAND.length+' present';
+        $('pkglist').innerHTML = CAND.map(p=>{
+          const on = all.has(p);
+          return '<div class="pkg"><span style="opacity:'+(on?1:.45)+'">'+esc(p)+'</span>'+
+                 (on?'<button class="danger" onclick="q(\'disable\',\''+p+'\')">off</button>'
+                    :'<button class="ok" onclick="q(\'enable\',\''+p+'\')">on</button>')+'</div>';
+        }).join('');
+  } catch(e){ show(e.message); }
+}
+function q(op,p){ $('pkg').value=p; pkgOp(op); }
+
+refresh();
+setInterval(refresh, 15000);
+</script>
+</body>
+</html>

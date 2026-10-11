@@ -33,7 +33,11 @@ fi
 file "${OUT}_dnroot"
 cp -f "${OUT}_dnroot" "$ROOT/${BASE}_dnroot_a64"
 
-echo "=== build mpnl: -> ${OUT}_mpnl ==="
+echo "=== build mpnl (root daemon + web UI): -> ${OUT}_mpnl ==="
+# Embed the single-page UI (src/primitives/webui.html) as a C array.
+if ! xxd -i -n webui_html src/primitives/webui.html > src/primitives/webui_html.h; then
+  echo "=== WEBUI HEADER GEN FAILED (xxd missing?) ==="; exit 1
+fi
 if ! aarch64-linux-gnu-gcc -O2 -w src/primitives/mpnl.c -o "${OUT}_mpnl" -static 2>/tmp/gl_build_mpnl.err; then
   echo "=== MPNL BUILD FAILED ==="; grep -iE 'error' /tmp/gl_build_mpnl.err | head -40; exit 1
 fi

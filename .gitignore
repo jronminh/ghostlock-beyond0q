@@ -1,5 +1,7 @@
 # build artifacts (rebuildable) — không track
 *_a64
+# generated embedded web UI header (from src/primitives/webui.html)
+src/primitives/webui_html.h
 *_arm32
 *.o
 *.ko
