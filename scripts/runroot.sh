@@ -18,13 +18,14 @@ case "$BIN" in /*) ;; *) BIN="/data/local/tmp/$BIN" ;; esac
 [ -x "$BIN" ] || { echo "runroot: not executable: $BIN" >&2; exit 2; }
 
 # Pick a safeplace path that exists and is rarely used at runtime.
-for s in /system/bin/atrace /system/bin/fsdbg /system/bin/dumpsys /system/bin/logcat; do
+for s in /system/bin/fsdbg /system/bin/smdexe /system/bin/ddexe /system/bin/resetreason /system/bin/atrace; do
   [ -e "$s" ] && SAFE="$s" && break
 done
 [ -n "$SAFE" ] || { echo "runroot: no safeplace target found" >&2; exit 3; }
 
 # private mount ns: bind our binary over $SAFE, then exec it ($SAFE path => d_path safeplace)
 exec /system/bin/unshare -m /system/bin/sh -c '
+  mount --make-rprivate / 2>/dev/null
   b="$1"; s="$2"; shift 2
   mount --bind "$b" "$s" || { echo "runroot: bind failed" >&2; exit 4; }
   exec "$s" "$@"

