@@ -49,7 +49,7 @@ firmware requires re-deriving them (`REPRODUCE.md` §2).
   read/write `/data`.
 - **Real user-space permissive SELinux:** marking the `kernel` type in the loaded
   `policydb.permissive_map` makes `setprop` from that domain actually pass
-  (`mv ... permissive=1`), without tripping RKP.
+  (`avc ... permissive=1`), without tripping RKP.
 - **DEFEX bypass:** any `/data` ELF runs as root by bind-mounting it over a
   compiled-in *safeplace* path.
 - **On-device control UI:** the helper is a **localhost HTTP server**
@@ -123,37 +123,16 @@ tools/
 
 ## Related work
 
-This repo is a **port** (not the discovery) of **GhostLock (CVE-2026-43499)** — a
-~15-year-old rtmutex/futex use-after-free disclosed in 2026 — part of a broad,
-fast-moving effort with many per-device ports.
+This is a port of **GhostLock (CVE-2026-43499)**, a ~15-year-old rtmutex/futex
+use-after-free disclosed in 2026. It is not the discovery.
 
-- **Base / upstream:** [`JoinChang/ghostlock-oneplus`](https://github.com/JoinChang/ghostlock-oneplus)
-  — the OnePlus line this repo derives from.
-- **Research / references:** the Nebu writeup
-  ([IonStack part II: GhostLock](https://nebusec.ai/research/ionstack-part-2/)) and
-  [NVD CVE-2026-43499](https://nvd.nist.gov/vuln/detail/CVE-2026-43499); vendor
-  advisories from Red Hat, SUSE, AWS, AlmaLinux and CloudLinux.
-- **Other device ports** (a sample — there are many):
-  one-click app [`YuKongA/ghostlock-app`](https://github.com/YuKongA/ghostlock-app);
-  OPPO/vivo/iQOO [`yijiacloud/GhostLock-OPPO-PCKM00`](https://github.com/yijiacloud/GhostLock-OPPO-PCKM00),
-  [`xiaohj233/ghostlock-x200-root`](https://github.com/xiaohj233/ghostlock-x200-root);
-  Xiaomi/Redmi [`ccp-p/ghostlock-cve-2026-43499-4.19-k40`](https://github.com/ccp-p/ghostlock-cve-2026-43499-4.19-k40);
-  Google Pixel [`alex193a/Root-My-Pixel`](https://github.com/alex193a/Root-My-Pixel);
-  Samsung [`wxxsfxyzm/GhostLock-Galaxy`](https://github.com/wxxsfxyzm/GhostLock-Galaxy),
-  [`snothin/GhostSam`](https://github.com/snothin/GhostSam),
-  [`mobilehackinglab/ghostlock-a17`](https://github.com/mobilehackinglab/ghostlock-a17);
-  Meta Quest [`veygax/HORiZonstack`](https://github.com/veygax/HORiZonstack);
-  Amazon [`R0rt1z2/GhostLock`](https://github.com/R0rt1z2/GhostLock).
-- **Tooling:** offset extraction
-  [`ctn-Qvo/auto_extract_offsets`](https://github.com/ctn-Qvo/auto_extract_offsets);
-  vulnerability detector
-  [`CakesTwix/Android-CVE-2026-43499`](https://github.com/CakesTwix/Android-CVE-2026-43499);
-  SELinux disable [`PeronGH/ghostlock-selinux-disabler`](https://github.com/PeronGH/ghostlock-selinux-disabler).
-- **This device:** searches for `beyond0q` / `SM-G970W` / `ghostlock s10e` return only
-  this repository — the Galaxy S10e (SM-G970W) is, as far as we can tell, not covered
-  elsewhere. What is specific here: the older **msm-4.14 / SD855** platform, the explicit
-  **RKP/KDP data-only** ceiling, the **DEFEX** and **fscrypt** workarounds, an on-device
-  control UI, and a fully from-source build (`REPRODUCE.md`).
+- **Upstream:** [`JoinChang/ghostlock-oneplus`](https://github.com/JoinChang/ghostlock-oneplus).
+- **References:** Nebu, *IonStack part II: GhostLock*; [NVD CVE-2026-43499](https://nvd.nist.gov/vuln/detail/CVE-2026-43499); advisories (Red Hat, SUSE, AWS, AlmaLinux, CloudLinux).
+- **Other ports (examples):** [`YuKongA/ghostlock-app`](https://github.com/YuKongA/ghostlock-app); [`yijiacloud/GhostLock-OPPO-PCKM00`](https://github.com/yijiacloud/GhostLock-OPPO-PCKM00); [`xiaohj233/ghostlock-x200-root`](https://github.com/xiaohj233/ghostlock-x200-root); [`ccp-p/ghostlock-cve-2026-43499-4.19-k40`](https://github.com/ccp-p/ghostlock-cve-2026-43499-4.19-k40); [`alex193a/Root-My-Pixel`](https://github.com/alex193a/Root-My-Pixel); [`wxxsfxyzm/GhostLock-Galaxy`](https://github.com/wxxsfxyzm/GhostLock-Galaxy); [`snothin/GhostSam`](https://github.com/snothin/GhostSam); [`mobilehackinglab/ghostlock-a17`](https://github.com/mobilehackinglab/ghostlock-a17); [`veygax/HORiZonstack`](https://github.com/veygax/HORiZonstack); [`R0rt1z2/GhostLock`](https://github.com/R0rt1z2/GhostLock).
+- **Tooling:** [`ctn-Qvo/auto_extract_offsets`](https://github.com/ctn-Qvo/auto_extract_offsets); [`CakesTwix/Android-CVE-2026-43499`](https://github.com/CakesTwix/Android-CVE-2026-43499); [`PeronGH/ghostlock-selinux-disabler`](https://github.com/PeronGH/ghostlock-selinux-disabler).
+- **This device:** no other public port of `beyond0q` / SM-G970W was found. Specific
+  to this port: msm-4.14 / SD855, the RKP/KDP data-only ceiling, the DEFEX and fscrypt
+  workarounds, the on-device UI, and a from-source build (`REPRODUCE.md`).
 
 ## CLI & log levels
 
@@ -188,4 +167,4 @@ Commands: `peek <hexaddr> [n]`, `read <hexaddr> <len>`, `write <hexaddr> <hexbyt
 
 - Raw evidence (kernel dumps, logs) is kept outside this repo.
 - **Never** touch the bootloader, partitions, or flash; avoid `adb uninstall`.
-- See `CREDITS.md` for who built this.
+- See `CREDITS.md` for authorship.
