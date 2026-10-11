@@ -108,22 +108,33 @@ So the whole "Settings/DPM/debloat" surface is reachable as root through `cmd`
 ## Bypass that *is* achievable: bind-mount over a safeplace path
 
 `task_defex_safeplace()` decides on the **mount-namespace path** of the target file
-(`core/defex_common.c: get_dc_target_name() -> d_path(&file->f_path, ...)`). A **bind
-mount** of our own binary over a path that *is* in the safeplace list makes it look
-safeplace, so DEFEX allows the exec — and the process runs as `uid 0` with full caps.
-No `.text`/rodata/RKP involvement: it is a pure VFS/mount operation.
+(`core/defex_common.c: get_dc_target_name() -> d_path(&file->f_path, ...)`), then
+`rules_lookup(path, feature_safeplace_path, file)`:
+
+* path not in the safeplace list ⇒ `is_violation = !0 = 1` ⇒ **safeplace violation** ⇒
+  `-DEFEX_DENY`;
+* path in the list ⇒ match ⇒ allow (normal case);
+* path in the list **but the file content does not match its recorded hash** ⇒
+  `rules_lookup` returns `DEFEX_INTEGRITY_FAIL`, and the handler takes Samsung's
+  lenient branch ⇒ `ret = DEFEX_ALLOW`
+  (`"Temporary make permissive mode ... system image is changed"`).
+
+A **bind mount** of our own binary over a path that *is* in the safeplace list hits
+the third case (path matches, content differs) ⇒ DEFEX allows, and the process runs
+as `uid 0` with full caps. No `.text`/rodata/RKP involvement: it is a pure VFS/mount
+operation.
 
 Verified on-device (kernel-domain root, SELinux permissive):
 
 ```
 $ /data/local/tmp/xtest
-Killed                                                   # DEFEX safeplace violation
-$ mount --bind /data/local/tmp/xtest /system/bin/atrace
-$ /system/bin/atrace VIA_BIND
+Killed                                                   # defex: safeplace violation ... child=/data/local/tmp/xtest
+$ sh scripts/runroot.sh /data/local/tmp/xtest VIA_BIND
 XTEST uid=0 euid=0 gid=0 ctx=u:r:kernel:s0 argc=2 arg1=VIA_BIND   # runs as root
+# dmesg: defex: integrity violation [task=sh, child=/system/bin/atrace, uid=0]
 ```
 
-Do it inside a private mount namespace so the bind mount does not leak into the
+It runs inside a private mount namespace so the bind mount does not leak into the
 system (`scripts/runroot.sh`):
 
 ```
