@@ -23,6 +23,7 @@ refs/rom-4.14-full/
 refs/kernelsu/
 # build artifacts / scratch helpers — không track
 mphelper
+mpnl
 getid
 pwn2
 rsd_diag

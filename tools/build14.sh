@@ -33,5 +33,12 @@ fi
 file "${OUT}_dnroot"
 cp -f "${OUT}_dnroot" "$ROOT/${BASE}_dnroot_a64"
 
+echo "=== build mpnl: -> ${OUT}_mpnl ==="
+if ! aarch64-linux-gnu-gcc -O2 -w src/primitives/mpnl.c -o "${OUT}_mpnl" -static 2>/tmp/gl_build_mpnl.err; then
+  echo "=== MPNL BUILD FAILED ==="; grep -iE 'error' /tmp/gl_build_mpnl.err | head -40; exit 1
+fi
+file "${OUT}_mpnl"
+cp -f "${OUT}_mpnl" "$ROOT/${BASE}_mpnl_a64"
+
 echo "=== ok ==="
-ls -la "$ROOT/${BASE}_a64" "$ROOT/${BASE}_dnroot_a64"
+ls -la "$ROOT/${BASE}_a64" "$ROOT/${BASE}_dnroot_a64" "$ROOT/${BASE}_mpnl_a64"

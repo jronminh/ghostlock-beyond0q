@@ -297,3 +297,13 @@ The one persisted-property path that *is* reachable:
 Setting a prop *live* would require writing the property-area trie
 (`/dev/__properties__/…`, mmap the trie + serial) or a policy change (RKP) — not attempted.
 
+**UPDATE (session 7):** the "policy change" path *is* reachable without tripping RKP.
+Marking the `kernel` type permissive in the in-memory `policydb.permissive_map` (not
+`__kdp_ro`; `kdp_init()` only protects `ss_initialized`/`selinux_enforcing_boot`/
+`selinux_enabled`/`init_sec`) makes `security_compute_av[_user]()` set
+`AVD_FLAGS_PERMISSIVE`, so `echo 0 > /sys/fs/selinux/enforce` passes and the kernel
+emits the genuine `SETENFORCE(0)` notice → init's cached userspace libselinux AVC
+reloads as permissive → `setprop` works live (`avc ... permissive=1`).
+Implemented in `src/core/fops.c` + `src/primitives/mpnl.c`. `settings`/`app_process`
+remain blocked by DEFEX. See `docs/SELINUX_USERSYNC.md`.
+

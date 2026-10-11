@@ -28,6 +28,14 @@ modifications. Verified method: configfs arbitrary R/W + **`modprobe_path`** roo
   (`CONFIG_CC_STACKPROTECTOR` ⇒ `cred=0x858, comm=0x860, pi_blocked_on=0x948`); a real
   `call_usermodehelper` writes `/data` (the "write-crippled" case was the *fake*
   work_struct UMH).
+- **User-space permissive (session 7):** the kernel-domain root now *really* flips
+  user-space SELinux. The driver marks the `kernel` type in
+  `policydb.permissive_map` (a fake `ebitmap_node` in the `core_pattern` buffer) and
+  the `mpnl` helper toggles `/sys/fs/selinux/enforce` `1 -> 0` once at start, so the
+  kernel emits the real `SETENFORCE(0)` netlink notice and init's cached libselinux
+  AVC reloads: `property_service` now accepts `setprop` from `u:r:kernel:s0`
+  (`avc ... permissive=1`). KDP is **not** tripped. `settings`/`app_process` stay
+  blocked by DEFEX. See `docs/SELINUX_USERSYNC.md`.
 
 Full detail: `docs/KSU_ROOT_FINDINGS.md` (sections 1-13 — the main findings, English),
 `docs/FLOW_DEBUG.md`, `docs/ROM_MECHANISM_4.14.md`, `docs/RUN_CONFIG.md`,

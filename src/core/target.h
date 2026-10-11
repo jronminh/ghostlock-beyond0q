@@ -25,6 +25,14 @@
 #define SELINUX_ENFORCING_OFF  0x02DC8CE8ULL  /* global int selinux_enforcing (enforcing_enabled() reads this), NOT selinux_state@0x2DC8CC8 */
 #define MODPROBE_PATH_OFF      0x029B93C0ULL  /* char modprobe_path[256] (kallsyms_fixed.txt) */
 #define CORE_PATTERN_OFF       0x029E6120ULL  /* char core_pattern[256] */
+#define SELINUX_SS_OFF         0x02DCC178ULL  /* static struct selinux_ss selinux_ss (bss) */
+/* selinux_ss embeds policydb at +8; ebitmap policydb.permissive_map is at
+ * offsetof(struct policydb,permissive_map)=0x1C0 -> absolute selinux_ss+0x1C8.
+ * Placing the kernel type in it makes security_compute_av[_user]() set
+ * AVD_FLAGS_PERMISSIVE for the kernel domain (see docs/SELINUX_USERSYNC.md). */
+#define SELINUX_PMAP_OFF       0x01C8ULL
+#define SELINUX_TYPE_KERNEL    791U           /* sidtab context.type for SECINITSID_KERNEL */
+#define SELINUX_EBITMAP_SIZE   384U           /* EBITMAP_UNIT_NUMS(6) * 64 */
 #define KPTR_RESTRICT_OFF2     0x029A92A8ULL  /* already defined above as KPTR_RESTRICT_OFF */
 #define KPTR_RESTRICT_OFF      0x029A92A8ULL
 #define CAP_CAPABLE_ACTIVE_OFF 0x00411DCCULL
@@ -67,6 +75,7 @@
 #define SELINUX_ENFORCING   (KIMAGE_TEXT_BASE + SELINUX_ENFORCING_OFF)
 #define MODPROBE_PATH       (KIMAGE_TEXT_BASE + MODPROBE_PATH_OFF)
 #define CORE_PATTERN        (KIMAGE_TEXT_BASE + CORE_PATTERN_OFF)
+#define SELINUX_SS          (KIMAGE_TEXT_BASE + SELINUX_SS_OFF)
 #define SELINUX_BLOB_SIZES  (KIMAGE_TEXT_BASE + SELINUX_BLOB_SIZES_OFF)
 #define SECURITY_HOOK_HEADS (KIMAGE_TEXT_BASE + SECURITY_HOOK_HEADS_OFF)
 #define KMALLOC_CACHES      (KIMAGE_TEXT_BASE + KMALLOC_CACHES_OFF)

