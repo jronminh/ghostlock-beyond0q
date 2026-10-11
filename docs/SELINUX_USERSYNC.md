@@ -235,7 +235,7 @@ left the `/dev/ashmem` fops redirect installed for ~10 min, and another process'
 `read()` landed in `configfs_read_file` -> `mutex_lock` oops. The shipped flow
 uses `--stop-after=verify`, which restores the fops immediately.)
 
-## 7. Evidence log (this session)
+## 7. Evidence log
 
 | Step | Observation |
 |---|---|

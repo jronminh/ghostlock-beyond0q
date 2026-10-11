@@ -7,9 +7,23 @@ exploit is **firmware-locked** by its symbol/struct offsets.
 
 | | |
 |---|---|
-| Device | Samsung **SM-G970W** (`beyond0qltecs`, S10e, SD855), bootloader **locked** is fine |
-| Kernel | **`4.14.190-23725627-abG970WVLU9IXE1`** (Android 12) |
+| Model / market code | **SM-G970W** (Galaxy S10e, SD855) |
+| Device / board code | **`beyond0q`** (`ro.product.device`); product `beyond0qltecs` |
+| Android | 12 (SDK 31) |
+| ROM build code | **`G970WVLU9IXE1`** (display id `SP1A.210812.016.G970WVLU9IXE1`) |
+| Fingerprint | `samsung/beyond0qltecs/beyond0q:12/SP1A.210812.016/G970WVLU9IXE1:user/release-keys` |
+| Kernel | **`4.14.190-23725627-abG970WVLU9IXE1`** |
+| Security patch | 2023-03-01 |
+| Build type | `user` / `ro.debuggable=0` |
+| CSC | `XAC` |
+| Boot state | `verifiedbootstate=green`, `flash.locked=1`, `sys.oem_unlock_allowed=0` (bootloader **locked** is fine) |
 | Result | a **transient, per-boot** uid-0 userspace root (no flash, no `/system`, no persistence) |
+
+Verify your unit before building:
+
+```
+adb shell 'getprop ro.product.device ro.build.display.id ro.build.version.security_patch; uname -r'
+```
 
 Build host: **WSL/Ubuntu** (or any arm64 Linux) with `aarch64-linux-gnu-gcc`,
 `python3`, `xxd`, `file`. Plus `adb` (platform-tools) on the Windows side.

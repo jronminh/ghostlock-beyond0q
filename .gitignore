@@ -32,7 +32,7 @@ pwn2
 rsd_diag
 glA*
 
-# evidence / session logs — not published
+# evidence / logs — not published
 dumps/
 recovered/
 

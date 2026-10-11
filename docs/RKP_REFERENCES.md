@@ -97,7 +97,7 @@ its PLT (DEFEX allowlists `init`, and PLT entries are plain data, so JOPP does n
 them). ⇒ For a *true* root on this Snapdragon device, the interesting front is the GPU
 (KGSL/adreno-6xx) DMA path, not more EL1 tricks.
 
-## On-device extraction (DONE this session)
+## On-device extraction
 
 The kernel-domain root can read block devices, so we pulled this device's own RKP image:
 

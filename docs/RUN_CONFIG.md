@@ -1,4 +1,4 @@
-# RUN_CONFIG.md — working run configurations (on-device, session 5)
+# RUN_CONFIG.md — working run configurations (on-device)
 
 Device: SM-G970W, `4.14.190-23725627-abG970WVLU9IXE1`.
 Binaries: the driver + payload + `mpnl` (root daemon/UI) built by

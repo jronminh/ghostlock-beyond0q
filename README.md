@@ -1,73 +1,78 @@
-# ghostlock-beyond0q — **deep fork** of GhostLock for the Samsung **SM-G970W (beyond0q)** device line
+# ghostlock-beyond0q — per-boot root on the Samsung SM-G970W (locked, verified boot)
 
-Local-only repository dedicated to the device we are testing: S10e Snapdragon
-(`beyond0qltecs`), SD855, Linux **4.14.190**, locked bootloader.
+A working port of the **GhostLock** futex-PI exploit to the Samsung Galaxy S10e
+(**SM-G970W**): a **per-boot, userspace uid-0 root** on a device with a **locked
+bootloader and AVB/SVB green** — no unlock, no flash, no KernelSU
+(`MODULE_SIG_FORCE=y`), no persistence. The chain wins a futex priority-inheritance
+use-after-free, redirects `/dev/ashmem` fops through configfs for **arbitrary kernel
+read/write**, and lands on `modprobe_path` to run a root helper that also serves an
+**on-device control UI**.
 
-Goal: **temporary (per-boot) userspace root** via a GhostLock port (futex PI UAF) on
-a locked, verified-boot Samsung device — no bootloader unlock, no KernelSU
-(`MODULE_SIG_FORCE=y`). Ceiling: `RKP_KDP / DMAP_PROT / CFP` ⇒ **data-only** kernel
-modifications. Verified method: configfs arbitrary R/W + **`modprobe_path`** root helper.
+## Target (exact)
 
-> NOTE: the commit history in this repo is a **curated reconstruction** built from
-> the sessions documented in `docs/`; it is **not** the original development
-> history. The upstream source repo (OnePlus line) is `ghostlock-oneplus`; this is a
-> **deep fork** scoped to beyond0q (the port diverges substantially from upstream).
+| | |
+|---|---|
+| Model / market code | **SM-G970W** (Galaxy S10e, Snapdragon 855) |
+| Device / board code | **`beyond0q`** (`ro.product.device`) |
+| Product name | `beyond0qltecs` |
+| Android | 12 (SDK 31) |
+| ROM build code | **`G970WVLU9IXE1`** — display id `SP1A.210812.016.G970WVLU9IXE1` |
+| Fingerprint | `samsung/beyond0qltecs/beyond0q:12/SP1A.210812.016/G970WVLU9IXE1:user/release-keys` |
+| Kernel | **`4.14.190-23725627-abG970WVLU9IXE1`** |
+| Security patch | 2023-03-01 |
+| Build type | `user` (`ro.debuggable=0`) |
+| CSC / region | `XAC` (`ro.csc.sales_code`) |
+| Baseband / bootloader | `G970WVLU9IXE1` |
+| Boot state | `ro.boot.verifiedbootstate=green`, `ro.boot.flash.locked=1`, `sys.oem_unlock_allowed=0` |
+| Knox | `ro.config.knox=v30` |
+| Chipset | Qualcomm SD855, with TrustZone RKP |
 
-## Status (end of session 6)
-
-- **Proven:** fops redirect (mode-4) + **configfs arbitrary R/W**; `physrw` via
-  configfs; **root via `modprobe_path`** → a root helper (`call_usermodehelper`, uid 0
-  + full caps) that **writes `/data`** and serves a **file-driven command channel**
-  (`rcmd`→`rout`). SELinux off, `core_pattern`, `kptr_restrict` writable. cred repoint
-  works but trips RKP.
-- **Blocked by design:** cred / page-table / `.text` edits (RKP `security_integrity_current`
-  panics; `set_memory_rw` is vmalloc-only), unsigned modules (`MODULE_SIG_FORCE`), new
-  `/data` files (fscrypt), `/system` (verity), and **persistence across reboot**
-  (bootloader unlock infeasible: `oem_unlock_allowed=0`, TEE + AVB/SVB green).
-- **Key facts:** `selinux_enforcing=0x2DC8CE8` (≠ `selinux_state`); task_struct **+8**
-  (`CONFIG_CC_STACKPROTECTOR` ⇒ `cred=0x858, comm=0x860, pi_blocked_on=0x948`); a real
-  `call_usermodehelper` writes `/data` (the "write-crippled" case was the *fake*
-  work_struct UMH).
-- **User-space permissive (session 7):** the kernel-domain root now *really* flips
-  user-space SELinux. The driver marks the `kernel` type in
-  `policydb.permissive_map` (a fake `ebitmap_node` in the `core_pattern` buffer) and
-  the `mpnl` helper toggles `/sys/fs/selinux/enforce` `1 -> 0` once at start, so the
-  kernel emits the real `SETENFORCE(0)` netlink notice and init's cached libselinux
-  AVC reloads: `property_service` now accepts `setprop` from `u:r:kernel:s0`
-  (`avc ... permissive=1`). KDP is **not** tripped. `settings`/`app_process` stay
-  blocked by DEFEX. See `docs/SELINUX_USERSYNC.md`.
-- **Root UI (session 8):** `mpnl` is also a **localhost HTTP server** on
-  `127.0.0.1:8080` serving an **embedded** single-page app (`src/primitives/webui.html`)
-  — drive root commands, `setprop`, and `cmd`-based tweaks from **Chrome on the
-  device** (no PC, no APK). Arm with `scripts/arm_root.sh`; verify with
-  `scripts/ui_selftest.sh`. See `docs/ROOT_UI.md`.
-
-Full detail: `docs/KSU_ROOT_FINDINGS.md` (sections 1-13 — the main findings, English),
-`docs/FLOW_DEBUG.md`, `docs/ROM_MECHANISM_4.14.md`, `docs/RUN_CONFIG.md`,
-`docs/DEBUG_WORKFLOW.md`.
-
-## Layout
+Confirm you have the right unit before anything else:
 
 ```
-README.md
-REPRODUCE.md            # build + run from source (start here)
-LICENSE                 # GPL-2.0
-docs/                   # English technical docs (findings, flow, run config)
-src/                    # exploit source
-  core/                 # route + payload builders (single timing-critical process)
-  primitives/           # rootshell.c, mphelper.c, mpnl.c + webui.html (root daemon + UI)
-  payload/              # dnroot.c -> the `dnroot` UMH payload binary
-  tools/                # glshell.c (debug shell), slideprobe.c, trigger.c, getid.c, rsd.c
-  devices/beyond0q/     # this device line (offsets.h)
-refs/rom-4.14/          # ROM kernel source subset (reference)
-scripts/                # host/device helpers (arm_root.sh, ui_selftest.sh, runroot.sh, ...)
-tools/
-  build14.sh            # build ALL artifacts (WSL/arm64 host) -> *_a64 + *_pwn2
+adb shell 'getprop ro.product.device ro.build.display.id ro.build.version.security_patch; uname -r'
+# expect:  beyond0q
+#          SP1A.210812.016.G970WVLU9IXE1
+#          2023-03-01
+#          4.14.190-23725627-abG970WVLU9IXE1
 ```
 
-## Build & run (WSL)
+The exploit's symbol/struct offsets are pinned to **this exact build**; any other
+firmware requires re-deriving them (`REPRODUCE.md` §2).
 
-Full from-source walkthrough: **`REPRODUCE.md`**. Short version:
+## What we achieved
+
+- **Exploit primitives work:** the futex PI UAF is reproducibly reachable; the
+  `/dev/ashmem` fops redirect installs **configfs arbitrary kernel R/W**.
+- **Root:** `modprobe_path` runs our helper as **uid 0, full caps**
+  (`u:r:kernel:s0`) via `call_usermodehelper` — a real root process that can
+  read/write `/data`.
+- **Real user-space permissive SELinux:** marking the `kernel` type in the loaded
+  `policydb.permissive_map` makes `setprop` from that domain actually pass
+  (`mv ... permissive=1`), without tripping RKP.
+- **DEFEX bypass:** any `/data` ELF runs as root by bind-mounting it over a
+  compiled-in *safeplace* path.
+- **On-device control UI:** the helper is a **localhost HTTP server**
+  (`127.0.0.1:8080`) serving an **embedded** single-page app — drive root commands,
+  `setprop`, and `cmd`-based tweaks from **Chrome on the phone** (no PC, no APK).
+- **Reachable surface:** SELinux off, `modprobe_path`/`core_pattern`/`kptr_restrict`
+  writes, `setprop` + persistent properties, `cmd settings`/`cmd package` tweaks.
+
+## What is blocked — by design
+
+| wall | why |
+|---|---|
+| `cred` / page-table / `.text` / `.rodata` writes | RKP (`security_integrity_current` panic); KDP protects the kernel image |
+| unsigned modules | `CONFIG_MODULE_SIG_FORCE=y` |
+| `/system` writes | dm-verity |
+| creating **new** `/data` files from the kernel domain | fscrypt (helper carries init's keyring) |
+| **persistence across reboot** | locked bootloader + TEE + AVB/SVB `green`; unlock infeasible |
+
+⇒ the result is a **transient, per-boot** root. Everything re-arms on each boot.
+
+## Quick start
+
+Full from-source walkthrough: **[`REPRODUCE.md`](REPRODUCE.md)**. Short version:
 
 ```
 # 1. build every artifact -> <base>_a64 (+ <base>_pwn2)
@@ -87,24 +92,45 @@ Then open `http://127.0.0.1:8080/` in Chrome **on the device**. The precise,
 one-command-per-step procedure and the working flag set are in
 `docs/DEBUG_WORKFLOW.md` and `docs/RUN_CONFIG.md`.
 
-## Notes
+## Layout
 
-- Raw evidence (kernel dumps, recovered sessions) is kept **locally** and not published
-  in this repo.
-- Never touch bootloader/partition/flash; avoid `adb uninstall`.
+```
+README.md
+REPRODUCE.md            # build + run from source (start here)
+LICENSE                 # GPL-2.0
+docs/                   # findings, flow, run config, root UI
+src/                    # exploit source
+  core/                 # route + payload builders (single timing-critical process)
+  primitives/           # rootshell.c, mphelper.c, mpnl.c + webui.html (root daemon + UI)
+  payload/              # dnroot.c -> the `dnroot` UMH payload binary
+  tools/                # glshell.c (debug shell), slideprobe.c, trigger.c, getid.c, rsd.c
+  devices/beyond0q/     # this device line (offsets.h)
+refs/rom-4.14/          # ROM kernel source subset (reference)
+scripts/                # host/device helpers (arm_root.sh, ui_selftest.sh, runroot.sh, ...)
+tools/
+  build14.sh            # build ALL artifacts (WSL/arm64 host) -> *_a64 + *_pwn2
+```
 
-## CLI & log levels (session 5 refactor)
+## Docs
 
-The driver keeps its env flags, and adds a thin CLI:
+- `REPRODUCE.md` — build and run from source, offsets/KASLR, troubleshooting.
+- `docs/KSU_ROOT_FINDINGS.md` — the findings (primitives, symbols, root channel).
+- `docs/SELINUX_USERSYNC.md` — why `setprop` needs a policy patch, not just a raw write.
+- `docs/DEFEX_BYPASS.md` — the safeplace bind-mount bypass.
+- `docs/ROOT_UI.md` — the localhost control panel (design, API, security model).
+- `docs/RKP_*.md`, `docs/KGSL_CVE_2023_21665.md` — protection stack and the GPU path.
+- `docs/DEBUG_WORKFLOW.md`, `docs/RUN_CONFIG.md` — the device loop and working flags.
+
+## CLI & log levels
+
+The driver keeps its env flags and adds a thin CLI:
 - `--log=quiet|info|debug` (or `DN_LOG`), default `info`. `debug` enables the
   **timing-sensitive walk logs** (`consumer: walk begin/end` + `fsync`) that are
   otherwise OFF to avoid clobbering the painted waiter during the walk.
-- `--stop-after=redirect|verify|umh|cred|full` — maps onto the old env flags:
+- `--stop-after=redirect|verify|umh|cred|full` — maps onto the env flags:
   `redirect`→`ONLY_FOPS`, `verify`→`ONLY_FOPS`+`CFI_STOP_VERIFY`,
   `umh`→`SKIP_CRED`, `cred`→`SKIP_UMH`, `full`→none.
-- Default `SSOPT_HOLD` is now **0** (the `select()` hold overwrites the waiter).
-
-Build from this repo (source of truth): `bash tools/build14.sh /tmp/glXX`.
+- Default `SSOPT_HOLD` is **0** (the `select()` hold overwrites the waiter).
 
 ## Debug shell over the live gadget (`--shell`)
 
@@ -124,8 +150,8 @@ Commands: `peek <hexaddr> [n]`, `read <hexaddr> <len>`, `write <hexaddr> <hexbyt
 `quit`. Results go to `/data/local/tmp/gl.out`; commands are read from
 `/data/local/tmp/gl.cmd` (consumed+deleted). Auto-exits after ~10 min.
 
-## Authorship
+## Notes
 
-Most of this work — exploit analysis, tooling, documentation, and the on-device
-investigation — was done by the AI assistant **DeepSeek V4.1 Flash** (DeepSeek),
-directed and reviewed by the device owner **jronminh**. See `CREDITS.md`.
+- Raw evidence (kernel dumps, logs) is kept outside this repo.
+- **Never** touch the bootloader, partitions, or flash; avoid `adb uninstall`.
+- See `CREDITS.md` for who built this.

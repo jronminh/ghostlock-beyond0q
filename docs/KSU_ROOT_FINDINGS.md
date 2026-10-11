@@ -1,4 +1,4 @@
-# KSU / root findings (session notes — beyond0q, SM-G970W, 4.14.190)
+# KSU / root findings (beyond0q, SM-G970W, 4.14.190)
 
 Target: `4.14.190-23725627-abG970WVLU9IXE1` (Android 12, non-GKI, locked bootloader).
 Kernel ELF + full symbol table available **locally** (not in this repo):
@@ -49,7 +49,7 @@ writes 0 to `selinux_enforcing`**. Trigger = exec a file with an unknown binary 
 2. The trigger file must hold a **non-printable** magic (4x0xFF). `search_binary_handler()`
    only calls `request_module("binfmt-%04x")` when the first 4 bytes are *not* printable —
    a file of `'?'*4` (0x3F, printable) is **silently ignored** and no helper spawns
-   (this bug cost a long debug session; `pwn2` must be 0xFF×4).
+   (this bug cost a long debugging detour; `pwn2` must be 0xFF×4).
 ```
 [run] modprobe_path @... <- '/data/local/tmp/mphelper' wr=25 rd=63 rb='...' selinux_off=1
 [trigger] /data/local/tmp/pwn2
@@ -161,7 +161,7 @@ So: full root for privileges/reads/exec, **except creating new `/data` files**
 (fscrypt keyring). Fix option: repoint `cred->session_keyring` to a keyring that
 holds the fscrypt key (or pre-warm each target inode).
 
-## 8. Repo changes this session
+## 8. Repo changes
 - `main.c` `write_root_script()`: KMI fallback `AVER="android$(getprop ro.build.version.release)"`
   (Samsung `uname -r` has no `androidNN`, old code produced `KMI=-4.14`).
 - `target.h`: `MODPROBE_PATH_OFF 0x029B93C0`, `CORE_PATTERN_OFF 0x029E6120`.
@@ -301,7 +301,7 @@ The one persisted-property path that *is* reachable:
 Setting a prop *live* would require writing the property-area trie
 (`/dev/__properties__/…`, mmap the trie + serial) or a policy change (RKP) — not attempted.
 
-**UPDATE (session 7):** the "policy change" path *is* reachable without tripping RKP.
+**UPDATE:** the "policy change" path *is* reachable without tripping RKP.
 Marking the `kernel` type permissive in the in-memory `policydb.permissive_map` (not
 `__kdp_ro`; `kdp_init()` only protects `ss_initialized`/`selinux_enforcing_boot`/
 `selinux_enabled`/`init_sec`) makes `security_compute_av[_user]()` set
