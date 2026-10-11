@@ -121,6 +121,40 @@ tools/
 - `docs/RKP_*.md`, `docs/KGSL_CVE_2023_21665.md` — protection stack and the GPU path.
 - `docs/DEBUG_WORKFLOW.md`, `docs/RUN_CONFIG.md` — the device loop and working flags.
 
+## Related work
+
+This repo is a **port** (not the discovery) of **GhostLock (CVE-2026-43499)** — a
+~15-year-old rtmutex/futex use-after-free disclosed in 2026 — part of a broad,
+fast-moving effort with many per-device ports.
+
+- **Base / upstream:** [`JoinChang/ghostlock-oneplus`](https://github.com/JoinChang/ghostlock-oneplus)
+  — the OnePlus line this repo derives from.
+- **Research / references:** the Nebu writeup
+  ([IonStack part II: GhostLock](https://nebusec.ai/research/ionstack-part-2/)) and
+  [NVD CVE-2026-43499](https://nvd.nist.gov/vuln/detail/CVE-2026-43499); vendor
+  advisories from Red Hat, SUSE, AWS, AlmaLinux and CloudLinux.
+- **Other device ports** (a sample — there are many):
+  one-click app [`YuKongA/ghostlock-app`](https://github.com/YuKongA/ghostlock-app);
+  OPPO/vivo/iQOO [`yijiacloud/GhostLock-OPPO-PCKM00`](https://github.com/yijiacloud/GhostLock-OPPO-PCKM00),
+  [`xiaohj233/ghostlock-x200-root`](https://github.com/xiaohj233/ghostlock-x200-root);
+  Xiaomi/Redmi [`ccp-p/ghostlock-cve-2026-43499-4.19-k40`](https://github.com/ccp-p/ghostlock-cve-2026-43499-4.19-k40);
+  Google Pixel [`alex193a/Root-My-Pixel`](https://github.com/alex193a/Root-My-Pixel);
+  Samsung [`wxxsfxyzm/GhostLock-Galaxy`](https://github.com/wxxsfxyzm/GhostLock-Galaxy),
+  [`snothin/GhostSam`](https://github.com/snothin/GhostSam),
+  [`mobilehackinglab/ghostlock-a17`](https://github.com/mobilehackinglab/ghostlock-a17);
+  Meta Quest [`veygax/HORiZonstack`](https://github.com/veygax/HORiZonstack);
+  Amazon [`R0rt1z2/GhostLock`](https://github.com/R0rt1z2/GhostLock).
+- **Tooling:** offset extraction
+  [`ctn-Qvo/auto_extract_offsets`](https://github.com/ctn-Qvo/auto_extract_offsets);
+  vulnerability detector
+  [`CakesTwix/Android-CVE-2026-43499`](https://github.com/CakesTwix/Android-CVE-2026-43499);
+  SELinux disable [`PeronGH/ghostlock-selinux-disabler`](https://github.com/PeronGH/ghostlock-selinux-disabler).
+- **This device:** searches for `beyond0q` / `SM-G970W` / `ghostlock s10e` return only
+  this repository — the Galaxy S10e (SM-G970W) is, as far as we can tell, not covered
+  elsewhere. What is specific here: the older **msm-4.14 / SD855** platform, the explicit
+  **RKP/KDP data-only** ceiling, the **DEFEX** and **fscrypt** workarounds, an on-device
+  control UI, and a fully from-source build (`REPRODUCE.md`).
+
 ## CLI & log levels
 
 The driver keeps its env flags and adds a thin CLI:
