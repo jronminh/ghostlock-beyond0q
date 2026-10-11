@@ -83,19 +83,61 @@ $ app_process64 ...  / toybox / sh / ip / iptables / dumpsys / logcat  -> OK
 So the whole "Settings/DPM/debloat" surface is reachable as root through `cmd`
 (and `app_process64` for JVM code, `sh` for scripts). See `scripts/root_tweaks.sh`.
 
-## What is still blocked (and why full disable is a RO/RKP problem)
+## What is still blocked (and why a *global* disable is a RO/RKP problem)
 
-* **Executing a native `/data` ELF as root** is denied (its path is not safeplace and
-  `CHECK_ROOT_CREDS` is true). A non-root (shell) exec is allowed but has no root.
-  Workarounds: run code via `app_process64` (JVM, from a `/data` DEX — DEFEX only
-  checks `execve`, not subsequent `dlopen`/DEX loading), via `sh`, or via `cmd`.
-* **Disabling DEFEX globally** would require either
-  * `boot_state_unlocked = true` — but it is `__ro_after_init` (`R boot_state_unlocked`
-    in kallsyms) ⇒ a read-only page; writing it trips STRICT_KERNEL_RWX/RKP, or
-  * patching `defex_get_features()` / `task_defex_enforce()` / the packed rules — all
-    in `.text`/rodata ⇒ RKP/KDP territory,
-  * the `/sys/defex/debug` `sp_status=` toggle — **not present on a `user` build**.
-  None attempted; the safeplace-binary route already covers the useful cases.
+* **Executing a native `/data` ELF as root** via the plain path is denied (its path is
+  not safeplace and `CHECK_ROOT_CREDS` is true). But it is trivially bypassed — see
+  below.
+* **Disabling DEFEX globally** is *not* cleanly possible on this `user` build. DEFEX
+  is invoked by **direct calls** (`task_defex_enforce(...)` in `fs/exec.c`,
+  `fs/open.c`, `fs/read_write.c`, `kernel/sys.c`), not through the LSM hook list, so
+  there is no hook to unlink; and every potential switch is read-only:
+
+  | candidate | why it fails |
+  |---|---|
+  | `/sys/defex/debug` `sp_status=` | file absent (`DEFEX_DEBUG_ENABLE`/`DEFEX_SYSFS_ENABLE` are userdebug/eng/factory only) |
+  | `global_safeplace_status = 0` | dead variable: initial value is `1` in the image ⇒ `DEFEX_PERMISSIVE_SP` **not** defined, so `defex_get_features()` returns the compile-time `GLOBAL_SAFEPLACE_STATUS` and ignores it |
+  | `defex_get_features()` / `task_defex_safeplace()` | `.text` (RO) ⇒ RKP/KDP |
+  | `boot_state_unlocked = true` | `__ro_after_init` (`R boot_state_unlocked`) ⇒ RO |
+  | `security_hook_heads` | `CONFIG_SECURITY_WRITABLE_HOOKS` is off ⇒ `__ro_after_init`; also irrelevant (direct calls) |
+  | safeplace rules | `const`/packed at build ⇒ rodata |
+
+  So a global off-switch would need a `.text`/rodata write ⇒ the same RKP wall as
+  `cred`. Not attempted.
+
+## Bypass that *is* achievable: bind-mount over a safeplace path
+
+`task_defex_safeplace()` decides on the **mount-namespace path** of the target file
+(`core/defex_common.c: get_dc_target_name() -> d_path(&file->f_path, ...)`). A **bind
+mount** of our own binary over a path that *is* in the safeplace list makes it look
+safeplace, so DEFEX allows the exec — and the process runs as `uid 0` with full caps.
+No `.text`/rodata/RKP involvement: it is a pure VFS/mount operation.
+
+Verified on-device (kernel-domain root, SELinux permissive):
+
+```
+$ /data/local/tmp/xtest
+Killed                                                   # DEFEX safeplace violation
+$ mount --bind /data/local/tmp/xtest /system/bin/atrace
+$ /system/bin/atrace VIA_BIND
+XTEST uid=0 euid=0 gid=0 ctx=u:r:kernel:s0 argc=2 arg1=VIA_BIND   # runs as root
+```
+
+Do it inside a private mount namespace so the bind mount does not leak into the
+system (`scripts/runroot.sh`):
+
+```
+runroot.sh /data/local/tmp/<tool> <args...>
+  # = unshare -m; mount --bind <tool> /system/bin/<safeplace>; exec /system/bin/<safeplace> <args>
+```
+
+## Level achieved
+
+* **Per-boot, per-exec:** DEFEX fully bypassed — arbitrary native code runs as root
+  (this is the "like SELinux" level: transient, re-applied each boot by re-running the
+  exploit + `mpnl`).
+* **Global DEFEX off:** not safely reachable (RO/`.text`).
+* **Across reboot:** none (locked bootloader + AVB), same as SELinux.
 
 ## Deployment notes
 
