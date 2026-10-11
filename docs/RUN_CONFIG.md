@@ -1,7 +1,9 @@
 # RUN_CONFIG.md — working run configurations (on-device, session 5)
 
 Device: SM-G970W, `4.14.190-23725627-abG970WVLU9IXE1`.
-Binaries: `glA9` (driver) + `dnroot` (UMH payload), built with `tools/build14.sh`.
+Binaries: the driver + payload + `mpnl` (root daemon/UI) built by
+`tools/build14.sh` (`<base>_a64`, `<base>_mpnl_a64`, `<base>_pwn2`); names like
+`glA9`/`glXX` below are just outputs of that script. See `REPRODUCE.md`.
 Per boot: get `SLIDE` with `slideprobe`; let the device **settle** (avoid running
 right after boot — busier = higher wedge rate).
 

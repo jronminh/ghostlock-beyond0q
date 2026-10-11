@@ -20,7 +20,8 @@ and the device recovers quickly by itself (watchdog) so the loop is fast.
 1. **Device up?** `adb devices` (and `getprop sys.boot_completed`).
    If absent: `adb wait-for-device`.
 2. **Slide (per boot):** `timeout 70 /data/local/tmp/slideprobe` → take the `IP`
-   line ending in `…bd4`; `slide = (IP_low32 − 0x08000000) − 0x3bd4`.
+   line ending in `…bd4`; `slide = (IP_low32 − 0x08000000) − 0x3bd4`
+   (source: `src/tools/slideprobe.c`, built by `tools/build14.sh`).
 3. **Refresh binaries (only if rebuilt):**
    `adb push glXX_a64 /data/local/tmp/glXX`, then `adb shell chmod 755 …`.
    For UMH: also `adb push glXX_dnroot_a64 /data/local/tmp/dnroot` + chmod.

