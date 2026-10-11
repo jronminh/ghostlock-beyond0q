@@ -97,6 +97,7 @@ one-command-per-step procedure and the working flag set are in
 ```
 README.md
 REPRODUCE.md            # build + run from source (start here)
+TODO.md                 # planned work (e.g. upstream profile contribution)
 LICENSE                 # GPL-2.0
 docs/                   # findings, flow, run config, root UI
 src/                    # exploit source
@@ -114,6 +115,7 @@ tools/
 ## Docs
 
 - `REPRODUCE.md` — build and run from source, offsets/KASLR, troubleshooting.
+- `TODO.md` — planned work, including an upstream SM-G970W profile for Root My Galaxy.
 - `docs/KSU_ROOT_FINDINGS.md` — the findings (primitives, symbols, root channel).
 - `docs/SELINUX_USERSYNC.md` — why `setprop` needs a policy patch, not just a raw write.
 - `docs/DEFEX_BYPASS.md` — the safeplace bind-mount bypass.
